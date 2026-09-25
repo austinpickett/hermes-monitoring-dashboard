@@ -1,0 +1,5 @@
+.dev/
+node_modules/
+# harness React bundle is built output (scripts/build-vendor.sh); its entry files are source
+vendor/*
+!vendor/src/
