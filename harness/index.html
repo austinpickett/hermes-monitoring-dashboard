@@ -1,0 +1,60 @@
+<!doctype html>
+<html class="dark">
+  <head>
+    <meta charset="utf-8" />
+    <title>telemetry harness</title>
+    <!-- Default dark theme tokens as resolved by the desktop renderer (captured from :root). -->
+    <style>
+      :root {
+        --ui-accent: #4a84fe;
+        --ui-base: #e6edf3;
+        --ui-text-primary: color-mix(in srgb, #e6edf3 94%, transparent);
+        --ui-text-secondary: color-mix(in srgb, #e6edf3 74%, transparent);
+        --ui-text-tertiary: color-mix(in srgb, #e6edf3 54%, transparent);
+        --ui-text-quaternary: color-mix(in srgb, #e6edf3 36%, transparent);
+        --ui-stroke-primary: color-mix(in srgb, #4a84fe 24%, color-mix(in srgb, #e6edf3 10%, transparent));
+        --ui-stroke-secondary: color-mix(in srgb, #4a84fe 16%, color-mix(in srgb, #e6edf3 7%, transparent));
+        --ui-stroke-tertiary: color-mix(in srgb, #4a84fe 10%, color-mix(in srgb, #e6edf3 5%, transparent));
+        --ui-stroke-quaternary: color-mix(in srgb, #4a84fe 6%, color-mix(in srgb, #e6edf3 3%, transparent));
+        --ui-control-active-background: color-mix(in srgb, #4a84fe 8%, color-mix(in srgb, #e6edf3 5%, transparent));
+        --ui-red: #e75e78;
+        --ui-yellow: #c08532;
+        --ui-green: #55a583;
+        --font-mono: Menlo, Monaco, 'SF Mono', monospace;
+        --font-sans: -apple-system, BlinkMacSystemFont, 'SF Pro Text', system-ui, sans-serif;
+      }
+      *, *::before, *::after { box-sizing: border-box; } /* the app's preflight */
+      html, body { margin: 0; height: 100%; background: color-mix(in srgb, #010409 38%, #161618); font-family: var(--font-sans); }
+      #app { display: grid; grid-template-rows: minmax(0, 1fr) 26px; height: 100vh; }
+      #bar { display: flex; justify-content: flex-end; align-items: center; padding: 0 10px; border-top: 1px solid var(--ui-stroke-tertiary); }
+    </style>
+    <script type="importmap">
+      {
+        "imports": {
+          "react": "/vendor/react.js",
+          "react/jsx-runtime": "/vendor/jsx-runtime.js",
+          "react-dom/client": "/vendor/react-dom-client.js",
+          "@hermes/plugin-sdk": "/harness/sdk-shim.js"
+        }
+      }
+    </script>
+  </head>
+  <body>
+    <div id="app"><main id="root" style="min-height: 0"></main><footer id="bar"></footer></div>
+    <script type="module">
+      import { createRoot } from 'react-dom/client'
+      import plugin from '/plugin/plugin.js'
+
+      const byArea = {}
+      plugin.register({
+        registerMany: cs => cs.forEach(c => (byArea[c.area] ??= []).push(c)),
+        register: c => (byArea[c.area] ??= []).push(c),
+        onEvent: () => () => {},
+        onDispose: () => {}
+      })
+      createRoot(document.getElementById('root')).render(byArea.routes[0].render())
+      createRoot(document.getElementById('bar')).render(byArea['statusbar.right'][0].render())
+      if (new URLSearchParams(location.search).has('sim')) setTimeout(() => [...document.querySelectorAll('button')].find(b => /SIM/.test(b.textContent))?.click(), 300)
+    </script>
+  </body>
+</html>
