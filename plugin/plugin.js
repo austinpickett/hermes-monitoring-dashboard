@@ -43,7 +43,95 @@ const S = {
   tokRate: 0,
   toolsPerMin: [], // timestamps
   sim: false,
-  simSessions: []
+  simSessions: [],
+  // Build flow: the page opens as an empty frame; Hermes composes it panel-by-panel with
+  // file tools, guided by the plugin's shipped skill. A step goes 'building' the moment its
+  // tool call starts and 'built' when it completes. Reset returns to the empty frame.
+  built: [], // ordered ids of built steps
+  building: null, // id of the step whose tool call is running
+  builtAt: 0,
+  buildDir: null // absolute dir the model writes into, learned from tool.complete
+}
+
+// Build steps in presentation order — one file = one visual widget on screen. Each names
+// the file the skill tells the model to write and which top-level KPIs unlock with it.
+// The dashboard reacts to each tool call as it starts — "the parts are all there already".
+const BUILD_STEPS = [
+  { id: 'throughput', file: 'panel-throughput.html', unlocks: ['tok'] },
+  { id: 'silicon', file: 'panel-silicon.html', unlocks: ['cpu', 'gpu', 'die'] },
+  { id: 'thermal', file: 'panel-thermal.html', unlocks: [] },
+  { id: 'fleet', file: 'panel-fleet.html', unlocks: ['agents'] },
+  { id: 'wire', file: 'panel-wire.html', unlocks: ['tools'] },
+  { id: 'memory', file: 'panel-memory.html', unlocks: ['mem'] },
+  { id: 'net', file: 'panel-net.html', unlocks: [] },
+  { id: 'disk', file: 'panel-disk.html', unlocks: [] },
+  { id: 'power', file: 'panel-power.html', unlocks: ['soc'] }
+]
+// The chrome step: the demo's first beat is "create a blank dashboard page" — that write
+// brings the plugin into existence (sidebar row + statusbar chip). Registering UI is live
+// (contrib registry), so the plugin can contribute its chrome the moment that write lands.
+const CHROME_STEP = { id: 'chrome', file: 'page.html' }
+const ALL_STEPS = [CHROME_STEP, ...BUILD_STEPS]
+const BUILD_DIR_HINT = 'telemetry-dashboard'
+const DISK_SYNC_MS = 2000
+const stepFor = name => BUILD_STEPS.find(s => s.id === name)
+const dirOf = p => String(p).replace(/[\\/][^\\/]*$/, '')
+const desktopFs = () => (typeof window !== 'undefined' ? window.hermesDesktop : null)
+
+function markStepBuilt(id) {
+  if (!S.built.includes(id)) {
+    S.built.push(id)
+    S.builtAt = Date.now()
+  }
+  if (S.building === id) S.building = null
+  if (id === 'chrome') registerChrome({ reveal: true })
+  emit()
+}
+
+// The files on disk are the source of truth for what's built, so the dashboard survives a
+// plugin reload or app restart mid-demo. Tool events still drive the instant reveal; this
+// reconciles. The build dir is learned from the model's own write (tool.complete carries the
+// resolved path), so nothing about the machine is hardcoded.
+async function syncBuildFromDisk() {
+  const fs = desktopFs()
+  if (!S.buildDir || !fs?.readDir) return
+  let names = []
+  try {
+    const r = await fs.readDir(S.buildDir)
+    names = (r?.entries ?? []).filter(e => !e.isDirectory).map(e => e.name)
+  } catch {}
+  const ids = ALL_STEPS.filter(s => names.includes(s.file)).map(s => s.id)
+  if (ids.length === S.built.length && ids.every(id => S.built.includes(id))) return
+  S.built = ids
+  if (S.built.includes('chrome')) registerChrome({ reveal: false })
+  else unregisterChrome()
+  emit()
+}
+
+async function resetBuild() {
+  const fs = desktopFs()
+  if (S.buildDir && fs?.trashPath) {
+    try {
+      await fs.trashPath(S.buildDir)
+    } catch (err) {
+      host.notify({ kind: 'error', message: `Telemetry reset: couldn't remove ${S.buildDir} (${err?.message ?? err})` })
+    }
+  }
+  S.built = []
+  S.building = null
+  unregisterChrome()
+  closeWorkspace()
+  emit()
+}
+
+// A tool call counts for a step when it writes/patches the step's asset under the build dir.
+function buildStepFromTool(name, args) {
+  if (name !== 'write_file' && name !== 'patch') return null
+  const path = String(args?.path ?? '')
+  if (!path.includes(BUILD_DIR_HINT)) return null
+  const file = path.split(/[\\/]/).pop() || path
+  if (path.endsWith(CHROME_STEP.file)) return CHROME_STEP
+  return BUILD_STEPS.find(s => path.endsWith(s.file)) || null
 }
 
 const listeners = new Set()
@@ -184,6 +272,11 @@ function onGatewayEvent(ev) {
       S.toolStarts[p.tool_id] = { t: now, name }
       S.toolsPerMin.push(now)
       logLine('tool', `${name}${p.context ? `  ${String(p.context).slice(0, 72)}` : ''}`, sid)
+      const step = buildStepFromTool(name, p.args)
+      if (step && !S.built.includes(step.id)) {
+        S.building = step.id
+        emit()
+      }
       break
     }
     case 'tool.complete': {
@@ -191,6 +284,18 @@ function onGatewayEvent(ev) {
       delete S.toolStarts[p.tool_id]
       const dur = p.duration_s ?? (st ? (now - st.t) / 1000 : null)
       logLine(p.error ? 'err' : 'done', `${p.name ?? st?.name ?? 'tool'}${dur != null ? `  ${dur.toFixed(2)}s` : ''}`, sid)
+      const step = buildStepFromTool(p.name ?? st?.name, p.args)
+      if (step) {
+        const resolved = p.result?.resolved_path
+        if (typeof resolved === 'string' && resolved.includes(BUILD_DIR_HINT)) {
+          S.buildDir = dirOf(resolved)
+          _ctx?.storage.set('buildDir', S.buildDir)
+        }
+        if (p.error || p.result?.error) {
+          if (S.building === step.id) S.building = null
+          emit()
+        } else markStepBuilt(step.id)
+      }
       break
     }
     case 'error':
@@ -1211,7 +1316,16 @@ function Header({ f }) {
             'aria-pressed': S.sim,
             onClick: () => setSim(!S.sim),
             children: S.sim ? 'SIM on' : 'SIM off'
-          })
+          }),
+          S.built.length || S.building
+            ? jsx(Button, {
+                size: 'xs',
+                variant: 'ghost',
+                title: 'Return the page to the empty frame for the next take',
+                onClick: () => resetBuild(),
+                children: 'Reset'
+              })
+            : null
         ]
       })
     ]
@@ -1235,19 +1349,22 @@ function TelemetryPage() {
   // wide fills one screen; mid pairs panels; narrow (a side pane) stacks them. Both of those scroll.
   const mode = width >= 1100 ? 'wide' : width >= 700 ? 'mid' : 'narrow'
   const span = (wide, mid) => ({ gridColumn: `span ${mode === 'wide' ? wide : mode === 'mid' ? mid : 12}` })
+  // Build flow: a panel is visible once its step is built (or building — the dashboard reacts to
+  // each tool call as it starts). Steps unlock their KPIs too. The chrome step (page.html) only
+  // brings the plugin into existence; the frame stays empty until the first panel starts.
+  const has = step => S.built.includes(step) || S.building === step
+  const allPanelsBuilt = BUILD_STEPS.every(s => S.built.includes(s.id))
+  const kpiOn = keys => allPanelsBuilt || keys.some(k => S.built.includes(k) || S.building === k)
+  const empty = !BUILD_STEPS.some(s => S.built.includes(s.id) || S.building === s.id)
 
   return jsxs('div', {
     ref: pageRef,
     style: { height: '100%', overflow: 'auto', padding: '14px 18px 18px', color: 'var(--ui-text-primary)', display: 'flex', flexDirection: 'column' },
     children: [
       jsx(Header, { f }),
-      !hardware && S.link === 'missing'
-        ? jsx('div', {
-            style: { ...MONO, fontSize: 11, color: 'var(--ui-text-tertiary)', padding: '6px 0 12px' },
-            children: 'This backend has no system.metrics RPC yet: hardware panels are dark, fleet + token panels are live.'
-          })
-        : null,
-      jsxs('div', {
+      empty
+        ? jsx(EmptyFrame, {})
+        : jsxs('div', {
         style: {
           display: 'grid',
           gridTemplateColumns: 'repeat(12, minmax(0, 1fr))',
@@ -1259,114 +1376,153 @@ function TelemetryPage() {
           rowGap: 16
         },
         children: [
-          // Row 1: headline numbers.
+          // Row 1: headline numbers — each unlocks with its build step.
           jsx('div', {
             style: { gridColumn: 'span 12', display: 'grid', gridTemplateColumns: `repeat(${mode === 'wide' ? 8 : 4}, minmax(0, 1fr))`, gap: 16, borderTop: '1px solid var(--ui-stroke-secondary)', paddingTop: 10 },
             children: [
-              jsx(Stat, { big: true, label: simmed('≈tok/s'), value: fmt(S.tokRate, S.tokRate < 10 ? 1 : 0) }),
-              jsx(Stat, { big: true, label: 'cpu', value: fmt(f?.cpu.percent), unit: '%', tone: heatCss(f && f.cpu.percent / 100) }),
-              jsx(Stat, { big: true, label: 'gpu', value: fmt(f?.gpus[0] ? f.gpus[0].active * 100 : null), unit: '%', tone: heatCss(f?.gpus[0]?.active) }),
-              jsx(Stat, { big: true, label: 'soc power', value: fmt(watts, 1), unit: 'W', tone: heatCss(watts == null ? null : watts / SOC_PEAK_W) }),
-              jsx(Stat, { big: true, label: 'die max', value: fmt(f?.die.max, 1), unit: '°C', tone: heatCss(tempT(f?.die.max)) }),
-              jsx(Stat, { big: true, label: 'mem', value: fmt(mem?.percent), unit: '%', tone: heatCss(mem && mem.percent / 100) }),
-              jsx(Stat, { big: true, label: simmed('agents'), value: String(busy), unit: subs ? `+${subs} sub` : undefined }),
-              jsx(Stat, { big: true, label: simmed('tools/min'), value: String(S.toolsPerMin.length) })
+              kpiOn(['tok']) ? jsx(Stat, { big: true, label: simmed('≈tok/s'), value: fmt(S.tokRate, S.tokRate < 10 ? 1 : 0) }) : null,
+              kpiOn(['cpu']) ? jsx(Stat, { big: true, label: 'cpu', value: fmt(f?.cpu.percent), unit: '%', tone: heatCss(f && f.cpu.percent / 100) }) : null,
+              kpiOn(['gpu']) ? jsx(Stat, { big: true, label: 'gpu', value: fmt(f?.gpus[0] ? f.gpus[0].active * 100 : null), unit: '%', tone: heatCss(f?.gpus[0]?.active) }) : null,
+              kpiOn(['soc']) ? jsx(Stat, { big: true, label: 'soc power', value: fmt(watts, 1), unit: 'W', tone: heatCss(watts == null ? null : watts / SOC_PEAK_W) }) : null,
+              kpiOn(['die']) ? jsx(Stat, { big: true, label: 'die max', value: fmt(f?.die.max, 1), unit: '°C', tone: heatCss(tempT(f?.die.max)) }) : null,
+              kpiOn(['mem']) ? jsx(Stat, { big: true, label: 'mem', value: fmt(mem?.percent), unit: '%', tone: heatCss(mem && mem.percent / 100) }) : null,
+              kpiOn(['agents']) ? jsx(Stat, { big: true, label: simmed('agents'), value: String(busy), unit: subs ? `+${subs} sub` : undefined }) : null,
+              kpiOn(['tools']) ? jsx(Stat, { big: true, label: simmed('tools/min'), value: String(S.toolsPerMin.length) }) : null
             ]
           }),
 
-          // Row 2: silicon.
-          jsx(Panel, {
-            title: 'silicon',
-            meta: f ? jsxs('span', { style: { display: 'inline-flex', gap: 14 }, children: [f.cpu.cores.length ? 'ioreport · dvfs · 1 hz' : 'psutil · 1 hz', jsx(HeatKey, { lo: 'idle', hi: '100%' })] }) : null,
-            style: span(8, 12),
-            children: jsx(DieMap, { frame: f })
-          }),
-          jsx(Panel, {
-            title: 'thermal',
-            meta: f ? jsxs('span', { style: { display: 'inline-flex', gap: 14 }, children: [`${f.temps.length} sensors · avg ${fmt(f.die.avg, 1)}°`, jsx(HeatKey, { lo: '35°', hi: '100°' })] }) : null,
-            style: span(4, 6),
-            children: jsx(Thermals, { frame: f })
-          }),
+          // Row 2: silicon + thermal.
+          has('silicon')
+            ? jsx(Panel, {
+              title: S.building === 'silicon' ? 'silicon · composing…' : 'silicon',
+              meta: f ? jsxs('span', { style: { display: 'inline-flex', gap: 14 }, children: [f.cpu.cores.length ? 'ioreport · dvfs · 1 hz' : 'psutil · 1 hz', jsx(HeatKey, { lo: 'idle', hi: '100%' })] }) : null,
+              style: span(8, 12),
+              children: jsx(DieMap, { frame: f })
+            })
+            : null,
+          has('thermal')
+            ? jsx(Panel, {
+              title: 'thermal',
+              meta: f ? jsxs('span', { style: { display: 'inline-flex', gap: 14 }, children: [`${f.temps.length} sensors · avg ${fmt(f.die.avg, 1)}°`, jsx(HeatKey, { lo: '35°', hi: '100°' })] }) : null,
+              style: span(4, 6),
+              children: jsx(Thermals, { frame: f })
+            })
+            : null,
 
-          // Row 3: fleet + scopes + log.
-          jsx(Panel, {
-            title: 'fleet',
-            meta: simmed(`${S.sessions.length + S.simSessions.length} contacts`),
-            style: span(4, 6),
-            children: jsx(Radar, {})
-          }),
-          jsxs(Panel, {
-            title: 'throughput',
-            meta: simmed(model ? String(model).toLowerCase() : null),
-            style: span(4, 6),
-            bodyStyle: { display: 'grid', gridTemplateRows: '1fr 1fr auto', gap: 10 },
-            children: [
-              jsxs('div', { style: SCOPE_BOX, children: [scopeLabel('≈tok/s stream'), jsx(Scope, { series: [{ data: S.hist.tok }], fmtY: v => fmt(v) })] }),
-              jsxs('div', { style: SCOPE_BOX, children: [scopeLabel('cpu % ─  gpu % ┄'), jsx(Scope, { series: [{ data: S.hist.cpu }, { data: S.hist.gpu }], max: 100, fmtY: v => `${v}%` })] }),
-              // Session usage appears once a real session reports it; SIM never fakes usage.
-              u
-                ? jsxs('div', {
-                    style: { display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 10 },
-                    children: [
-                      jsx(Stat, { label: 'context', value: fmt(u.context_percent), unit: '%' }),
-                      jsx(Stat, { label: 'cache hit', value: fmt(u.cache_hit_pct), unit: '%' }),
-                      jsx(Stat, { label: 'avg tps', value: fmt(u.avg_tps, 1) }),
-                      jsx(Stat, { label: 'out tok', value: u.output != null ? fmtInt(u.output) : DASH })
-                    ]
-                  })
-                : jsx('div', { style: { ...LABEL, color: 'var(--ui-text-quaternary)' }, children: 'session usage · awaiting a live turn' })
-            ]
-          }),
-          jsx(Panel, { title: 'wire', meta: simmed('gateway events'), style: span(4, 6), children: jsx(EventLog, {}) }),
+          // Row 3: fleet + throughput + wire.
+          has('fleet')
+            ? jsx(Panel, {
+              title: 'fleet',
+              meta: simmed(`${S.sessions.length + S.simSessions.length} contacts`),
+              style: span(4, 6),
+              children: jsx(Radar, {})
+            })
+            : null,
+          has('throughput')
+            ? jsxs(Panel, {
+              title: S.building === 'throughput' ? 'throughput · composing…' : 'throughput',
+              meta: simmed(model ? String(model).toLowerCase() : null),
+              style: span(4, 6),
+              bodyStyle: { display: 'grid', gridTemplateRows: '1fr 1fr auto', gap: 10 },
+              children: [
+                jsxs('div', { style: SCOPE_BOX, children: [scopeLabel('≈tok/s stream'), jsx(Scope, { series: [{ data: S.hist.tok }], fmtY: v => fmt(v) })] }),
+                jsxs('div', { style: SCOPE_BOX, children: [scopeLabel('cpu % ─  gpu % ┄'), jsx(Scope, { series: [{ data: S.hist.cpu }, { data: S.hist.gpu }], max: 100, fmtY: v => `${v}%` })] }),
+                // Session usage appears once a real session reports it; SIM never fakes usage.
+                u
+                  ? jsxs('div', {
+                      style: { display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 10 },
+                      children: [
+                        jsx(Stat, { label: 'context', value: fmt(u.context_percent), unit: '%' }),
+                        jsx(Stat, { label: 'cache hit', value: fmt(u.cache_hit_pct), unit: '%' }),
+                        jsx(Stat, { label: 'avg tps', value: fmt(u.avg_tps, 1) }),
+                        jsx(Stat, { label: 'out tok', value: u.output != null ? fmtInt(u.output) : DASH })
+                      ]
+                    })
+                  : jsx('div', { style: { ...LABEL, color: 'var(--ui-text-quaternary)' }, children: 'session usage · awaiting a live turn' })
+              ]
+            })
+            : null,
+          has('wire') ? jsx(Panel, { title: 'wire', meta: simmed('gateway events'), style: span(4, 6), children: jsx(EventLog, {}) }) : null,
 
-          // Row 4: power, memory, io.
-          jsxs(Panel, {
-            title: 'power',
-            meta: watts != null ? `soc ${fmt(watts, 2)}W` : null,
-            style: span(3, 6),
-            bodyStyle: { display: 'grid', gridTemplateRows: '1fr auto', gap: 8 },
-            children: [
-              jsx('div', { style: { minHeight: 0 }, children: jsx(Scope, { series: [{ data: S.hist.watts }], fmtY: v => `${v}W` }) }),
-              jsx('div', {
-                style: { display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 8 },
-                children: POWER_KEYS.map(k => jsx(Stat, { label: k, value: fmt(f?.power_w[k], 2), unit: 'W' }, k))
-              })
-            ]
-          }),
-          jsxs(Panel, {
-            title: 'memory',
-            meta: mem ? fmtBytes(mem.total, 0) : null,
-            style: span(3, 6),
-            bodyStyle: { display: 'grid', alignContent: 'start', gap: 12 },
-            children: [
-              jsx(Meter, { label: 'ram', used: mem?.used, total: mem?.total, detail: mem ? `${fmtBytes(mem.used)} / ${fmtBytes(mem.total, 0)}` : DASH }),
-              jsx(Meter, { label: 'swap', used: mem?.swap_used, total: mem?.swap_total, detail: mem ? `${fmtBytes(mem.swap_used)} / ${fmtBytes(mem.swap_total, 0)}` : DASH }),
-              vol ? jsx(Meter, { label: `disk ${vol.mount}`, used: vol.used, total: vol.total, detail: `${fmtBytes(vol.used, 0)} / ${fmtBytes(vol.total, 0)}` }) : null,
-              f
-                ? jsxs('div', {
-                    style: { ...MONO, fontSize: 10.5, color: 'var(--ui-text-tertiary)', display: 'flex', justifyContent: 'space-between' },
-                    children: [
-                      jsx('span', { children: `hermes pid ${f.process.pid}` }),
-                      jsx('span', { children: `${fmtBytes(f.process.rss)} · ${fmt(f.process.cpu_percent)}% · ${f.process.threads}thr` })
-                    ]
-                  })
-                : null
-            ]
-          }),
-          jsx(Panel, {
-            title: 'net',
-            meta: f ? `↓${fmtRate(f.net.rx_bps)}  ↑${fmtRate(f.net.tx_bps)}` : null,
-            style: span(3, 6),
-            children: jsx(Scope, { series: [{ data: S.hist.rx }, { data: S.hist.tx }], fmtY: v => `${fmtBytes(v, 0)}/s` })
-          }),
-          jsx(Panel, {
-            title: 'disk io',
-            meta: f ? `r ${fmtRate(f.disk.read_bps)}  w ${fmtRate(f.disk.write_bps)}` : null,
-            style: span(3, 6),
-            children: jsx(Scope, { series: [{ data: S.hist.rd }, { data: S.hist.wr }], fmtY: v => `${fmtBytes(v, 0)}/s` })
-          })
+          // Row 4: power, memory, net, disk io.
+          has('power')
+            ? jsxs(Panel, {
+              title: S.building === 'power' ? 'power · composing…' : 'power',
+              meta: watts != null ? `soc ${fmt(watts, 2)}W` : null,
+              style: span(3, 6),
+              bodyStyle: { display: 'grid', gridTemplateRows: '1fr auto', gap: 8 },
+              children: [
+                jsx('div', { style: { minHeight: 0 }, children: jsx(Scope, { series: [{ data: S.hist.watts }], fmtY: v => `${v}W` }) }),
+                jsx('div', {
+                  style: { display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 8 },
+                  children: POWER_KEYS.map(k => jsx(Stat, { label: k, value: fmt(f?.power_w[k], 2), unit: 'W' }, k))
+                })
+              ]
+            })
+            : null,
+          has('memory')
+            ? jsxs(Panel, {
+              title: S.building === 'memory' ? 'memory · composing…' : 'memory',
+              meta: mem ? fmtBytes(mem.total, 0) : null,
+              style: span(3, 6),
+              bodyStyle: { display: 'grid', alignContent: 'start', gap: 12 },
+              children: [
+                jsx(Meter, { label: 'ram', used: mem?.used, total: mem?.total, detail: mem ? `${fmtBytes(mem.used)} / ${fmtBytes(mem.total, 0)}` : DASH }),
+                jsx(Meter, { label: 'swap', used: mem?.swap_used, total: mem?.swap_total, detail: mem ? `${fmtBytes(mem.swap_used)} / ${fmtBytes(mem.swap_total, 0)}` : DASH }),
+                vol ? jsx(Meter, { label: `disk ${vol.mount}`, used: vol.used, total: vol.total, detail: `${fmtBytes(vol.used, 0)} / ${fmtBytes(vol.total, 0)}` }) : null,
+                f
+                  ? jsxs('div', {
+                      style: { ...MONO, fontSize: 10.5, color: 'var(--ui-text-tertiary)', display: 'flex', justifyContent: 'space-between' },
+                      children: [
+                        jsx('span', { children: `hermes pid ${f.process.pid}` }),
+                        jsx('span', { children: `${fmtBytes(f.process.rss)} · ${fmt(f.process.cpu_percent)}% · ${f.process.threads}thr` })
+                      ]
+                    })
+                  : null
+              ]
+            })
+            : null,
+          has('net')
+            ? jsx(Panel, {
+              title: 'net',
+              meta: f ? `↓${fmtRate(f.net.rx_bps)}  ↑${fmtRate(f.net.tx_bps)}` : null,
+              style: span(3, 6),
+              children: jsx(Scope, { series: [{ data: S.hist.rx }, { data: S.hist.tx }], fmtY: v => `${fmtBytes(v, 0)}/s` })
+            })
+            : null,
+          has('disk')
+            ? jsx(Panel, {
+              title: 'disk io',
+              meta: f ? `r ${fmtRate(f.disk.read_bps)}  w ${fmtRate(f.disk.write_bps)}` : null,
+              style: span(3, 6),
+              children: jsx(Scope, { series: [{ data: S.hist.rd }, { data: S.hist.wr }], fmtY: v => `${fmtBytes(v, 0)}/s` })
+            })
+            : null
         ]
       })
+    ]
+  })
+}
+
+// The pre-build page: an honest empty frame waiting for Hermes to compose it, with the
+// build order the shipped skill directs and a way back once built.
+function EmptyFrame() {
+  return jsxs('div', {
+    style: { flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 18, borderTop: '1px solid var(--ui-stroke-secondary)', marginTop: 8 },
+    children: [
+      jsxs('div', { style: { display: 'flex', gap: 10, alignItems: 'center' }, children: [
+        jsx(GlyphSpinner, { ariaLabel: 'Composing' }),
+        jsx('span', { style: { ...MONO, fontSize: 12, color: 'var(--ui-text-secondary)' }, children: 'the parts are all there already — waiting for Hermes to assemble them' })
+      ] }),
+      jsxs('div', { style: { display: 'flex', gap: 8, flexWrap: 'wrap', justifyContent: 'center', maxWidth: 640 }, children:
+        BUILD_STEPS.map((s, i) =>
+          jsx('span', {
+            style: { ...MONO, fontSize: 10.5, color: 'var(--ui-text-quaternary)', border: '1px solid var(--ui-stroke-secondary)', borderRadius: 2, padding: '2px 8px' },
+            children: `${i + 1} ${s.id}`
+          }, s.id)
+        )
+      }),
+      jsx('span', { style: { ...LABEL, color: 'var(--ui-text-quaternary)' }, children: 'ask Hermes to compose the telemetry dashboard · reset from ⌘K' })
     ]
   })
 }
@@ -1398,13 +1554,72 @@ function Chip() {
 
 // ── registration ──────────────────────────────────────────────────────────────────────────────
 
+// Chrome (sidebar nav + statusbar chip) registers only when the model writes page.html, so the
+// plugin is invisible until the demo directs it into existence. Reset undoes it so the next
+// take starts clean. The route + palette commands stay always-on.
+let _chromeDispose = null
+let _ctx = null
+let _closeWorkspace = null
+
+// The reveal opens the page as a tile docked beside the chat (the handoff's side-by-side
+// layout) rather than replacing it; older desktops without openWorkspace fall back to the route.
+function openWorkspace() {
+  if (typeof host.openWorkspace === 'function') {
+    _closeWorkspace = host.openWorkspace(ID, {
+      title: 'Telemetry',
+      dock: { pane: 'workspace', pos: 'right' },
+      minWidth: '30rem',
+      render: () => jsx(TelemetryPage, {}),
+      onClose: () => {
+        _closeWorkspace = null
+      }
+    })
+  } else {
+    host.navigate(ROUTE)
+  }
+}
+
+function closeWorkspace() {
+  const close = _closeWorkspace
+  _closeWorkspace = null
+  if (close) close()
+}
+
+function registerChrome({ reveal } = {}) {
+  if (!_ctx) return
+  if (!_chromeDispose) {
+    _chromeDispose = _ctx.registerMany([
+      { id: 'chip', area: STATUSBAR_AREAS.right, order: 5, render: () => jsx(Chip, {}) },
+      { id: 'nav', area: SIDEBAR_NAV_AREA, order: 60, data: { codicon: 'pulse', label: 'Telemetry', path: ROUTE } }
+    ])
+  }
+  // The reveal: the blank frame opens itself ON the command — nothing is pre-opened.
+  if (reveal) openWorkspace()
+}
+
+function unregisterChrome() {
+  if (_chromeDispose) {
+    _chromeDispose()
+    _chromeDispose = null
+  }
+}
+
 export default {
   id: ID,
   register(ctx) {
+    _ctx = ctx
+    // Chrome starts HIDDEN. Disk sync restores it (and every built panel) if a build already
+    // exists — a reload mid-demo keeps the dashboard as the model left it.
+    S.buildDir = ctx.storage.get('buildDir', null)
+    void syncBuildFromDisk()
+    const stopSync = ctx.setInterval(() => void syncBuildFromDisk(), DISK_SYNC_MS)
+    ctx.onDispose(() => {
+      stopSync()
+      unregisterChrome()
+      closeWorkspace()
+    })
     ctx.registerMany([
       { id: 'page', area: ROUTES_AREA, data: { path: ROUTE }, render: () => jsx(TelemetryPage, {}) },
-      { id: 'chip', area: STATUSBAR_AREAS.right, order: 5, render: () => jsx(Chip, {}) },
-      { id: 'nav', area: SIDEBAR_NAV_AREA, order: 60, data: { codicon: 'pulse', label: 'Telemetry', path: ROUTE } },
       {
         id: 'open',
         area: PALETTE_AREA,
@@ -1413,6 +1628,18 @@ export default {
           label: 'Open Telemetry',
           keywords: ['telemetry', 'metrics', 'cpu', 'gpu', 'temperature', 'dashboard', 'fleet'],
           run: () => host.navigate(ROUTE)
+        }
+      },
+      {
+        id: 'reset',
+        area: PALETTE_AREA,
+        data: {
+          id: `${ID}.reset`,
+          label: 'Reset Telemetry Dashboard',
+          keywords: ['telemetry', 'reset', 'compose', 'empty', 'demo'],
+          run: () => {
+            void resetBuild()
+          }
         }
       }
     ])
