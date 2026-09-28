@@ -4,7 +4,8 @@
 Does what the runtime's own ``ensure_model_ready`` does, from outside the app: POST the router's
 ``/models/load``, wait until the model is resident, then prove it with one short generation.
 
-    HERMES_HOME=/path/to/home python scripts/warm-model.py [MODEL_ID]
+    python scripts/warm-model.py [MODEL_ID]          # the default Hermes home
+    HERMES_HOME=/other/home python scripts/warm-model.py   # a scratch or profile home
 
 The runtime unloads a model after 15 minutes idle (supervisor ``IDLE_UNLOAD_S``) and reloads it on
 the next message (~100 s on the Spark), so run this within ~10 minutes of the first on-stage prompt.
@@ -20,8 +21,19 @@ from pathlib import Path
 RESIDENT = ("loaded", "ready")
 
 
+def default_home() -> Path:
+    """Same resolution as Hermes (hermes_constants): HERMES_HOME, else the platform default —
+    %LOCALAPPDATA%\\hermes on Windows, ~/.hermes elsewhere."""
+    if os.environ.get("HERMES_HOME", "").strip():
+        return Path(os.path.expandvars(os.path.expanduser(os.environ["HERMES_HOME"])))
+    if sys.platform == "win32":
+        base = os.environ.get("LOCALAPPDATA", "").strip()
+        return (Path(base) if base else Path.home() / "AppData" / "Local") / "hermes"
+    return Path.home() / ".hermes"
+
+
 def main() -> int:
-    home = Path(os.environ.get("HERMES_HOME") or Path.home() / ".hermes")
+    home = default_home()
     state = home / "runtimes" / "llamacpp" / "server.json"
     if not state.exists():
         print(f"no local runtime state at {state} — is the local engine running?")
