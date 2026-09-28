@@ -6,7 +6,7 @@
 //   HERMES_HOME=/path/to/home node scripts/sync-plugin.mjs
 //
 // The shipped skill reaches the model through `skills.external_dirs` pointed at
-// `desktop-plugins/hermes-telemetry/skills` (relative to HERMES_HOME) — see DEMO.md.
+// `desktop-plugins/hermes-monitoring-dashboard/skills` (relative to HERMES_HOME) — see DEMO.md.
 import { cpSync, existsSync, mkdirSync, readdirSync, rmSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join, relative } from 'node:path'
@@ -14,7 +14,7 @@ import { fileURLToPath } from 'node:url'
 
 const src = join(dirname(fileURLToPath(import.meta.url)), '..', 'plugin')
 const home = process.env.HERMES_HOME || join(homedir(), '.hermes')
-const dst = join(home, 'desktop-plugins', 'hermes-telemetry')
+const dst = join(home, 'desktop-plugins', 'hermes-monitoring-dashboard')
 
 const walk = dir =>
   readdirSync(dir).flatMap(name => {

@@ -1,4 +1,4 @@
-// Hermes Telemetry — realtime host + fleet instrument panel.
+// Hermes Monitoring — realtime host + fleet instrument panel.
 // Hardware comes from the `system.metrics` gateway RPC; fleet/tokens from gateway events and
 // session RPCs. Nothing here is invented: a sensor the host can't read renders as "—", and the
 // SIM switch (clearly badged) is the only source of synthetic data.
@@ -15,8 +15,8 @@ import {
 import { useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from 'react'
 import { jsx, jsxs } from 'react/jsx-runtime'
 
-const ID = 'hermes-telemetry'
-const ROUTE = '/telemetry'
+const ID = 'hermes-monitoring-dashboard'
+const ROUTE = '/monitoring'
 const HISTORY = 150 // samples kept per trace (~2.5 min at 1 Hz)
 
 // ── store ──────────────────────────────────────────────────────────────────────────────────────
@@ -72,7 +72,7 @@ const BUILD_STEPS = [
 // (contrib registry), so the plugin can contribute its chrome the moment that write lands.
 const CHROME_STEP = { id: 'chrome', file: 'page.html' }
 const ALL_STEPS = [CHROME_STEP, ...BUILD_STEPS]
-const BUILD_DIR_HINT = 'telemetry-dashboard'
+const BUILD_DIR_HINT = 'monitoring-dashboard'
 const DISK_SYNC_MS = 2000
 const stepFor = name => BUILD_STEPS.find(s => s.id === name)
 const dirOf = p => String(p).replace(/[\\/][^\\/]*$/, '')
@@ -114,7 +114,7 @@ async function resetBuild() {
     try {
       await fs.trashPath(S.buildDir)
     } catch (err) {
-      host.notify({ kind: 'error', message: `Telemetry reset: couldn't remove ${S.buildDir} (${err?.message ?? err})` })
+      host.notify({ kind: 'error', message: `Monitoring reset: couldn't remove ${S.buildDir} (${err?.message ?? err})` })
     }
   }
   S.built = []
@@ -1300,7 +1300,7 @@ function Header({ f }) {
       jsxs('div', {
         style: { display: 'flex', alignItems: 'baseline', gap: 12, minWidth: 0 },
         children: [
-          jsx('span', { style: { ...MONO, fontSize: 13, letterSpacing: '0.14em', color: 'var(--ui-text-primary)' }, children: 'TELEMETRY' }),
+          jsx('span', { style: { ...MONO, fontSize: 13, letterSpacing: '0.14em', color: 'var(--ui-text-primary)' }, children: 'MONITORING' }),
           jsx('span', { style: { ...LABEL, color: 'var(--ui-text-tertiary)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }, children: spec })
         ]
       }),
@@ -1332,7 +1332,7 @@ function Header({ f }) {
   })
 }
 
-function TelemetryPage() {
+function MonitoringPage() {
   useFeed(true)
   useStore()
   useClock()
@@ -1522,7 +1522,7 @@ function EmptyFrame() {
           }, s.id)
         )
       }),
-      jsx('span', { style: { ...LABEL, color: 'var(--ui-text-quaternary)' }, children: 'ask Hermes to compose the telemetry dashboard · reset from ⌘K' })
+      jsx('span', { style: { ...LABEL, color: 'var(--ui-text-quaternary)' }, children: 'ask Hermes to compose the monitoring dashboard · reset from ⌘K' })
     ]
   })
 }
@@ -1541,7 +1541,7 @@ function Chip() {
   return jsxs('button', {
     type: 'button',
     onClick: () => host.navigate(ROUTE),
-    title: 'Open telemetry',
+    title: 'Open Monitoring',
     style: { ...MONO, fontSize: 11, display: 'inline-flex', gap: 8, alignItems: 'center', color: 'var(--ui-text-secondary)', background: 'none', border: 0, padding: '0 4px', cursor: 'pointer' },
     children: [
       jsx('span', { children: simmed(`${fmt(S.tokRate, S.tokRate < 10 ? 1 : 0)} tok/s`) }),
@@ -1566,10 +1566,10 @@ let _closeWorkspace = null
 function openWorkspace() {
   if (typeof host.openWorkspace === 'function') {
     _closeWorkspace = host.openWorkspace(ID, {
-      title: 'Telemetry',
+      title: 'Monitoring',
       dock: { pane: 'workspace', pos: 'right' },
       minWidth: '30rem',
-      render: () => jsx(TelemetryPage, {}),
+      render: () => jsx(MonitoringPage, {}),
       onClose: () => {
         _closeWorkspace = null
       }
@@ -1590,7 +1590,7 @@ function registerChrome({ reveal } = {}) {
   if (!_chromeDispose) {
     _chromeDispose = _ctx.registerMany([
       { id: 'chip', area: STATUSBAR_AREAS.right, order: 5, render: () => jsx(Chip, {}) },
-      { id: 'nav', area: SIDEBAR_NAV_AREA, order: 60, data: { codicon: 'pulse', label: 'Telemetry', path: ROUTE } }
+      { id: 'nav', area: SIDEBAR_NAV_AREA, order: 60, data: { codicon: 'pulse', label: 'Monitoring', path: ROUTE } }
     ])
   }
   // The reveal: the blank frame opens itself ON the command — nothing is pre-opened.
@@ -1619,14 +1619,14 @@ export default {
       closeWorkspace()
     })
     ctx.registerMany([
-      { id: 'page', area: ROUTES_AREA, data: { path: ROUTE }, render: () => jsx(TelemetryPage, {}) },
+      { id: 'page', area: ROUTES_AREA, data: { path: ROUTE }, render: () => jsx(MonitoringPage, {}) },
       {
         id: 'open',
         area: PALETTE_AREA,
         data: {
           id: `${ID}.open`,
-          label: 'Open Telemetry',
-          keywords: ['telemetry', 'metrics', 'cpu', 'gpu', 'temperature', 'dashboard', 'fleet'],
+          label: 'Open Monitoring',
+          keywords: ['monitoring', 'telemetry', 'metrics', 'cpu', 'gpu', 'temperature', 'dashboard', 'fleet'],
           run: () => host.navigate(ROUTE)
         }
       },
@@ -1635,8 +1635,8 @@ export default {
         area: PALETTE_AREA,
         data: {
           id: `${ID}.reset`,
-          label: 'Reset Telemetry Dashboard',
-          keywords: ['telemetry', 'reset', 'compose', 'empty', 'demo'],
+          label: 'Reset Monitoring Dashboard',
+          keywords: ['monitoring', 'telemetry', 'reset', 'compose', 'empty', 'demo'],
           run: () => {
             void resetBuild()
           }
