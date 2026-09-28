@@ -56,7 +56,12 @@ def main() -> int:
     def statuses():
         return {m["id"]: m.get("status", {}).get("value", "unknown") for m in call("/models").get("data", [])}
 
-    models = statuses()
+    try:
+        models = statuses()
+    except OSError as exc:  # URLError subclasses OSError: nothing listening on the recorded port
+        print(f"local engine not reachable at {base} ({getattr(exc, 'reason', exc)}).")
+        print("The engine runs inside Hermes: open the Hermes app (or the dev app) first, then re-run this.")
+        return 2
     if not models:
         print("router lists no models")
         return 2

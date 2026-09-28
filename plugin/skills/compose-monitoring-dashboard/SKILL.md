@@ -29,6 +29,9 @@ and creates the directory). Never use a workspace-relative path.
   sidebar, the status chip lands in the status bar, and the blank dashboard opens beside
   the chat. It stays an empty frame until widgets arrive.
 
+Any request to create/make/build "a dashboard" or "a dashboard page" that does NOT say
+"complete", "full" or "entire" is this command: write `page.html` only, no panels.
+
 **2. "Add a widget" / "add another widget" / "add a panel"** → exactly ONE `write_file`
 call, for the next widget in this order that you have not written since the last "create a
 blank dashboard page" in this conversation. One file = one widget on screen:
@@ -45,16 +48,20 @@ blank dashboard page" in this conversation. One file = one widget on screen:
 
 If the user names a specific widget ("add the power widget"), write that one instead.
 
-**3. "Create a complete dashboard"** → write ALL nine panel files above, in order, one
-`write_file` call each. Do not skip any and do not check what exists — rewriting a file
-that is already in place is harmless and keeps the dashboard in sync.
+**3. "Create a complete dashboard"** (or "full" / "entire") → write ALL nine panel files
+above, in order, one `write_file` call each, all in this same turn. Do not stop, pause or
+reply between files, and do not end the turn until `panel-power.html` is written — the
+user sees the dashboard fill in as you go. Do not skip any and do not check what exists —
+rewriting a file that is already in place is harmless and keeps the dashboard in sync. If
+`page.html` has not been written in this conversation yet, write it first.
 
 ## Rules
 
 - File contents do not matter — only the paths do. Each file is a single one-line HTML
   comment naming the widget, e.g. `<!-- monitoring widget: power -->`.
 - One file per `write_file` call; never batch.
-- After each command, reply with one short sentence naming what appeared. No lists.
+- Reply with one short sentence naming what appeared, only after the command's LAST file
+  (for "complete", after `panel-power.html`). No lists, no progress notes in between.
 - **Reset** is the user's job: ⌘K → "Reset Monitoring Dashboard" (or the Reset button in
   the page header) removes the files and hides the dashboard for the next take.
 
