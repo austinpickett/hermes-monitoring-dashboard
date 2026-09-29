@@ -21,6 +21,23 @@ from pathlib import Path
 RESIDENT = ("loaded", "ready")
 
 
+def _call(base, key, route, body=None, timeout=30):
+    req = urllib.request.Request(
+        base + route,
+        data=None if body is None else json.dumps(body).encode(),
+        headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+        method="GET" if body is None else "POST",
+    )
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        raw = r.read()
+        return json.loads(raw) if raw else {}
+
+
+def _statuses(base, key):
+    return {m["id"]: m.get("status", {}).get("value", "unknown")
+            for m in _call(base, key, "/models", timeout=10).get("data", [])}
+
+
 def default_home() -> Path:
     """Same resolution as Hermes (hermes_constants): HERMES_HOME, else the platform default —
     %LOCALAPPDATA%\\hermes on Windows, ~/.hermes elsewhere."""
@@ -35,33 +52,38 @@ def default_home() -> Path:
 def main() -> int:
     home = default_home()
     state = home / "runtimes" / "llamacpp" / "server.json"
-    if not state.exists():
-        print(f"no local runtime state at {state} — is the local engine running?")
-        return 2
-    info = json.loads(state.read_text(encoding="utf-8"))
-    base = info["base_url"].rstrip("/").removesuffix("/v1")
-    key = info.get("api_key") or ""
+    # Hermes starts the engine a little after the app opens (~30-70 s on a cold boot), so wait for it
+    # instead of failing: re-read server.json every pass, since a fresh boot can rewrite port and key.
+    wait_s = float(os.environ.get("WARM_WAIT_S", "180"))
+    deadline = time.monotonic() + wait_s
+    announced = False
+    while True:
+        base = key = ""
+        err = "no runtime state yet"
+        if state.exists():
+            try:
+                info = json.loads(state.read_text(encoding="utf-8"))
+                base = info["base_url"].rstrip("/").removesuffix("/v1")
+                key = info.get("api_key") or ""
+                models = _statuses(base, key)
+                break
+            except (OSError, ValueError, KeyError) as exc:  # URLError is an OSError: nothing listening yet
+                err = str(getattr(exc, "reason", exc))
+        if time.monotonic() > deadline:
+            print(f"local engine not reachable after {wait_s:.0f}s ({err}).")
+            print("The engine runs inside Hermes: open the Hermes app (or the dev app) first, then re-run this.")
+            return 2
+        if not announced:
+            print("waiting for the local engine to come up…", flush=True)
+            announced = True
+        time.sleep(3)
 
     def call(route, body=None, timeout=30):
-        req = urllib.request.Request(
-            base + route,
-            data=None if body is None else json.dumps(body).encode(),
-            headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
-            method="GET" if body is None else "POST",
-        )
-        with urllib.request.urlopen(req, timeout=timeout) as r:
-            raw = r.read()
-            return json.loads(raw) if raw else {}
+        return _call(base, key, route, body, timeout)
 
     def statuses():
-        return {m["id"]: m.get("status", {}).get("value", "unknown") for m in call("/models").get("data", [])}
+        return _statuses(base, key)
 
-    try:
-        models = statuses()
-    except OSError as exc:  # URLError subclasses OSError: nothing listening on the recorded port
-        print(f"local engine not reachable at {base} ({getattr(exc, 'reason', exc)}).")
-        print("The engine runs inside Hermes: open the Hermes app (or the dev app) first, then re-run this.")
-        return 2
     if not models:
         print("router lists no models")
         return 2
