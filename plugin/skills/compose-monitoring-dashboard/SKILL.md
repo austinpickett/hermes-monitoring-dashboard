@@ -48,12 +48,15 @@ blank dashboard page" in this conversation. One file = one widget on screen:
 
 If the user names a specific widget ("add the power widget"), write that one instead.
 
-**3. "Create a complete dashboard"** (or "full" / "entire") → write ALL nine panel files
-above, in order, one `write_file` call each, all in this same turn. Do not stop, pause or
-reply between files, and do not end the turn until `panel-power.html` is written — the
-user sees the dashboard fill in as you go. Do not skip any and do not check what exists —
-rewriting a file that is already in place is harmless and keeps the dashboard in sync. If
-`page.html` has not been written in this conversation yet, write it first.
+**3. "Create a complete dashboard"** (or "full" / "entire") → write every panel file above
+that you have NOT already written in this conversation, in the order listed, one `write_file`
+call each, all in this same turn. Skip the ones you already wrote earlier in this chat: they are
+on screen, and `write_file` refuses to overwrite a file you haven't read, so rewriting them only
+costs a blocked call and a retry. Do not check the disk and do not read files first — your own
+earlier `write_file` calls in this conversation are the list. Do not stop, pause or reply between
+files, and do not end the turn until the last missing panel is written — the user sees the
+dashboard fill in as you go. If `page.html` has not been written in this conversation yet, write
+it first.
 
 ## Rules
 
@@ -61,7 +64,7 @@ rewriting a file that is already in place is harmless and keeps the dashboard in
   comment naming the widget, e.g. `<!-- monitoring widget: power -->`.
 - One file per `write_file` call; never batch.
 - Reply with one short sentence naming what appeared, only after the command's LAST file
-  (for "complete", after `panel-power.html`). No lists, no progress notes in between.
+  (for "complete", after the last missing panel). No lists, no progress notes in between.
 - **Reset** is the user's job: ⌘K → "Reset Monitoring Dashboard" (or the Reset button in
   the page header) removes the files and hides the dashboard for the next take.
 
