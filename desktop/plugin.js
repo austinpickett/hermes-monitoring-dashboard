@@ -75,6 +75,8 @@ const BUILD_STEPS = [
 const CHROME_STEP = { id: 'chrome', file: 'page.html' }
 const ALL_STEPS = [CHROME_STEP, ...BUILD_STEPS]
 const BUILD_DIR_HINT = 'monitoring-dashboard'
+// Reset trashes files in the build dir, so only a folder named exactly monitoring-dashboard qualifies.
+const isBuildDir = dir => typeof dir === 'string' && /(^|[\\/])monitoring-dashboard$/.test(dir)
 const DISK_SYNC_MS = 2000
 const stepFor = name => BUILD_STEPS.find(s => s.id === name)
 const dirOf = p => String(p).replace(/[\\/][^\\/]*$/, '')
@@ -151,11 +153,14 @@ async function resetBuild() {
   diskGeneration++
   const fs = desktopFs()
   if (S.buildDir && fs?.trashPath) {
-    try {
-      await fs.trashPath(S.buildDir)
-    } catch (err) {
-      host.notify({ kind: 'error', message: `Personal Dashboard reset: couldn't remove ${S.buildDir} (${err?.message ?? err})` })
-      return
+    // Only the marker files the last listing found, never the folder itself or anything else in it.
+    for (const step of ALL_STEPS.filter(s => S.built.includes(s.id))) {
+      try {
+        await fs.trashPath(`${S.buildDir}/${step.file}`)
+      } catch (err) {
+        host.notify({ kind: 'error', message: `Personal Dashboard reset: couldn't remove ${S.buildDir}/${step.file} (${err?.message ?? err})` })
+        return
+      }
     }
   }
   S.built = []
@@ -172,8 +177,8 @@ function buildStepFromTool(name, args) {
   if (!path.includes(BUILD_DIR_HINT)) return null
   const file = path.split(/[\\/]/).pop() || path
   if (file === CONFIG_FILE) return { id: 'config', file: CONFIG_FILE }
-  if (path.endsWith(CHROME_STEP.file)) return CHROME_STEP
-  return BUILD_STEPS.find(s => path.endsWith(s.file)) || null
+  if (file === CHROME_STEP.file) return CHROME_STEP
+  return BUILD_STEPS.find(s => file === s.file) || null
 }
 
 const listeners = new Set()
@@ -386,7 +391,7 @@ function onGatewayEvent(ev) {
       const step = buildStepFromTool(p.name ?? st?.name, p.args)
       if (step) {
         const resolved = p.result?.resolved_path
-        if (typeof resolved === 'string' && resolved.includes(BUILD_DIR_HINT)) {
+        if (isBuildDir(dirOf(resolved))) {
           S.buildDir = dirOf(resolved)
           _ctx?.storage.set('buildDir', S.buildDir)
         }
@@ -1816,7 +1821,8 @@ export default {
       .map(atom => atom.listen(resetHardware))
     // Chrome starts HIDDEN. Disk sync restores it (and every built panel) if a build already
     // exists — a reload mid-demo keeps the dashboard as the model left it.
-    S.buildDir = ctx.storage.get('buildDir', null) || '~/monitoring-dashboard'
+    const storedDir = ctx.storage.get('buildDir', null)
+    S.buildDir = isBuildDir(storedDir) ? storedDir : '~/monitoring-dashboard'
     void syncBuildFromDisk()
     const stopSync = ctx.setInterval(() => void syncBuildFromDisk(), DISK_SYNC_MS)
     ctx.onDispose(() => {

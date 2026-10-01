@@ -5,8 +5,10 @@ import test from 'node:test'
 import vm from 'node:vm'
 const source = await readFile(new URL('../../desktop/plugin.js', import.meta.url), 'utf8')
 const config = widgets => JSON.stringify({ version: 1, widgets })
-function load() {
+function load({ storedDir = null } = {}) {
   const files = new Map()
+  const trashed = []
+  let onEvent = () => {}
   const notices = []
   const contributions = []
   const disposers = []
@@ -15,22 +17,22 @@ function load() {
   const sandbox = {
     Date, console, setInterval: () => 1, clearInterval() {},
     jsx: (type, props, key) => ({ type, props, key }), jsxs: (type, props, key) => ({ type, props, key }),
-    host: { state: { profile: atom, connectionId: atom, gateway: atom }, notify: n => notices.push(n), request: async () => ({ sessions: [] }) },
+    host: { state: { profile: atom, connectionId: atom, gateway: atom }, notify: n => notices.push(n), navigate() {}, request: async () => ({ sessions: [] }) },
     ROUTES_AREA: 'route', SIDEBAR_NAV_AREA: 'nav', STATUSBAR_AREAS: { right: 'bar' }, PALETTE_AREA: 'palette',
     window: { hermesDesktop: {
       readDir: async () => { if (readError) throw new Error('permission denied'); return { entries: [...files.keys()].map(name => ({ name, isDirectory: false })) } },
       readFileText: async path => ({ text: files.get(path.split('/').pop()), binary: false, truncated: false }),
-      trashPath: async () => { trashCount++; files.clear() }
+      trashPath: async path => { trashCount++; trashed.push(path); files.delete(path.split('/').pop()) }
     } }
   }
   vm.runInNewContext(source.replace(/import\s+[\s\S]*?from ['"][^'"]+['"]\n/g, '').replace('export default {', 'globalThis.plugin = {') + '\nglobalThis.api = { S, parseDashboardConfig, orderedWidgets, monthDays, ConfiguredWidgets, metricPanels, syncBuildFromDisk, buildStepFromTool, resetBuild, WIDGET_TYPES }', sandbox)
   const ctx = {
-    storage: { get: () => null, set() {} }, setInterval: () => () => {},
-    registerMany: cs => { contributions.push(...cs); return () => {} }, onDispose: fn => disposers.push(fn), onEvent() {}
+    storage: { get: () => storedDir, set() {} }, setInterval: () => () => {},
+    registerMany: cs => { contributions.push(...cs); return () => {} }, onDispose: fn => disposers.push(fn), onEvent: (_, fn) => { onEvent = fn }
   }
   sandbox.plugin.register(ctx)
   return { ...sandbox.api, files, notices, contributions, fs: sandbox.window.hermesDesktop,
-    failRead: on => { readError = on }, trashCount: () => trashCount,
+    failRead: on => { readError = on }, trashCount: () => trashCount, trashed, event: ev => onEvent(ev),
     dispose: () => disposers.forEach(fn => fn()) }
 }
 const settle = () => new Promise(resolve => setImmediate(resolve))
@@ -79,7 +81,25 @@ test('file polling loads config alone, retains last good on errors, recovers and
   assert.deepEqual(Array.from(app.S.built), ['chrome', 'fleet', 'wire'])
   assert.equal(app.metricPanels({ f: null, model: null, span: () => ({}) }).fleet().props.title, 'Sessions')
   assert.equal(app.metricPanels({ f: null, model: null, span: () => ({}) }).wire().props.title, 'feed')
-  await app.resetBuild(); assert.equal(app.trashCount(), 1)
+  await app.resetBuild()
+  assert.deepEqual(app.trashed, ['~/monitoring-dashboard/page.html', '~/monitoring-dashboard/panel-fleet.html', '~/monitoring-dashboard/panel-wire.html'])
+  app.dispose()
+})
+
+test('reset never targets a folder learned from an unrelated write or a stale stored path', async () => {
+  const app = load({ storedDir: '/home/user/projects' }); await settle()
+  assert.equal(app.S.buildDir, '~/monitoring-dashboard')
+  assert.equal(app.buildStepFromTool('write_file', { path: '/home/user/monitoring-dashboard-site/homepage.html' }), null)
+  const write = path => app.event({ type: 'tool.complete', payload: { tool_id: path, name: 'write_file', args: { path }, result: { resolved_path: path } } })
+  write('/home/user/monitoring-dashboard-site/page.html')
+  write('/home/user/.hermes/plugins/hermes-monitoring-dashboard/page.html')
+  assert.equal(app.S.buildDir, '~/monitoring-dashboard')
+  write('/home/user/monitoring-dashboard/page.html')
+  assert.equal(app.S.buildDir, '/home/user/monitoring-dashboard')
+  app.files.set('page.html', ''); app.files.set('notes.txt', '')
+  await app.resetBuild()
+  assert.deepEqual(app.trashed, ['/home/user/monitoring-dashboard/page.html'])
+  assert.ok(app.files.has('notes.txt'))
   app.dispose()
 })
 
