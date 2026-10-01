@@ -43,17 +43,69 @@
     <div id="app"><main id="root" style="min-height: 0"></main><footer id="bar"></footer></div>
     <script type="module">
       import { createRoot } from 'react-dom/client'
-      import plugin from '/plugin/plugin.js'
+      import plugin from '/desktop/plugin.js'
+      import { host } from '/harness/sdk-shim.js'
 
       const byArea = {}
-      plugin.register({
-        registerMany: cs => cs.forEach(c => (byArea[c.area] ??= []).push(c)),
-        register: c => (byArea[c.area] ??= []).push(c),
-        onEvent: () => () => {},
-        onDispose: () => {}
-      })
-      createRoot(document.getElementById('root')).render(byArea.routes[0].render())
-      createRoot(document.getElementById('bar')).render(byArea['statusbar.right'][0].render())
+      const disposers = []
+      const events = new Set()
+      const builtFiles = ['page', 'panel-throughput', 'panel-silicon', 'panel-thermal', 'panel-fleet', 'panel-wire', 'panel-memory', 'panel-net', 'panel-disk', 'panel-power']
+      let previewBuilt = !new URLSearchParams(location.search).has('empty')
+      const storage = new Map(previewBuilt ? [['buildDir', 'harness/monitoring-dashboard']] : [])
+      // Preview the composed layout through the same disk-reconciliation seam,
+      // without inventing gateway traffic or hardware readings.
+      window.hermesDesktop = {
+        readDir: async () => ({ entries: previewBuilt ? builtFiles.map(file => ({ name: `${file}.html`, isDirectory: false })) : [] }),
+        trashPath: async () => { previewBuilt = false }
+      }
+      const bar = createRoot(document.getElementById('bar'))
+      const page = createRoot(document.getElementById('root'))
+      const refreshBar = () => bar.render(byArea['statusbar.right']?.[0]?.render() ?? null)
+      const register = c => {
+        ;(byArea[c.area] ??= []).push(c)
+        refreshBar()
+        return () => {
+          byArea[c.area] = byArea[c.area].filter(entry => entry !== c)
+          refreshBar()
+        }
+      }
+      const fixture = new URLSearchParams(location.search).get('fixture')
+      if (fixture) document.title = `FIXTURE ${fixture} · telemetry harness`
+      const ctx = {
+        registerMany: cs => {
+          const off = cs.map(register)
+          return () => off.forEach(fn => fn())
+        },
+        register,
+        storage: {
+          get: (key, fallback) => storage.has(key) ? storage.get(key) : fallback,
+          set: (key, value) => storage.set(key, value),
+          remove: key => storage.delete(key)
+        },
+        setInterval: (fn, ms) => {
+          const id = setInterval(fn, ms)
+          return () => clearInterval(id)
+        },
+        onEvent: (_type, fn) => (events.add(fn), () => events.delete(fn)),
+        onDispose: fn => disposers.push(fn),
+        async rest(path, { timeoutMs = 10000 } = {}) {
+          const query = fixture ? `?fixture=${encodeURIComponent(fixture)}` : ''
+          const response = await fetch(`/api/plugins/${plugin.id}${path}${query}`, { signal: AbortSignal.timeout(timeoutMs) })
+          if (!response.ok) throw new Error(`${response.status}: ${await response.text()}`)
+          return response.json()
+        }
+      }
+      plugin.register(ctx)
+      page.render(byArea.routes[0].render())
+      window.harness = {
+        host,
+        dispose: () => {
+          disposers.forEach(fn => fn())
+          page.unmount()
+          bar.unmount()
+          events.clear()
+        }
+      }
       if (new URLSearchParams(location.search).has('sim')) setTimeout(() => [...document.querySelectorAll('button')].find(b => /SIM/.test(b.textContent))?.click(), 300)
     </script>
   </body>

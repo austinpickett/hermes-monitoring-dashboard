@@ -1,5 +1,5 @@
 // Hermes Monitoring — realtime host + fleet instrument panel.
-// Hardware comes from the `system.metrics` gateway RPC; fleet/tokens from gateway events and
+// Hardware comes from this plugin's scoped REST backend; fleet/tokens from gateway events and
 // session RPCs. Nothing here is invented: a sensor the host can't read renders as "—", and the
 // SIM switch (clearly badged) is the only source of synthetic data.
 import {
@@ -153,42 +153,94 @@ let consumers = 0
 let pageOpen = 0
 let timers = []
 let lastPoll = 0
+let feedGeneration = 0
+let metricsInFlight = false
+let fleetInFlight = false
+
+function resetHardware() {
+  feedGeneration++
+  lastPoll = 0
+  S.frame = null
+  S.link = 'pending'
+  for (const key of Object.keys(S.hist)) S.hist[key] = ring()
+  S.sessions = []
+  S.subagents = {}
+  S.activity = {}
+  S.streaming = {}
+  S.usage = null
+  S.log = []
+  S.toolStarts = {}
+  S.tokBucket = 0
+  S.tokRate = 0
+  S.toolsPerMin = []
+  emit()
+  schedule()
+}
+
+// Missing sections are independent sensor failures, not a failed host. Keep
+// numeric nulls intact: unsupported counters must not look like idle hardware.
+function normalizeFrame(f) {
+  return {
+    ...f,
+    cpu: { ...f.cpu, cores: f.cpu?.cores ?? [], clusters: f.cpu?.clusters ?? [], per_core: f.cpu?.per_core ?? [] },
+    gpus: f.gpus ?? [],
+    power_w: f.power_w ?? {},
+    net: f.net ?? {},
+    disk: { ...f.disk, volumes: f.disk?.volumes ?? [] },
+    temps: (f.temps ?? []).filter(t => Number.isFinite(t?.celsius)),
+    die: dieStats(f.temps)
+  }
+}
 
 async function pollMetrics() {
+  if (!_ctx || metricsInFlight) return
+  metricsInFlight = true
+  const generation = feedGeneration
+  const ctx = _ctx
+  const current = () => ctx === _ctx && generation === feedGeneration
   lastPoll = Date.now()
   try {
-    const f = await host.request('system.metrics', {})
-    // `available: false` = the backend's sampler failed; only a whole frame is trusted.
-    if (!f?.available || !f.cpu || !f.memory) {
-      S.link = 'error'
-      emit()
-      return
-    }
-    f.die = dieStats(f.temps)
+    const result = await ctx.rest('/metrics', { timeoutMs: 10000 })
+    if (!current()) return
+    if (!result || result.available === false) throw new Error('Metrics unavailable')
+    const f = normalizeFrame(result)
     S.link = 'ok'
     S.frame = f
     if (f.interval_s) {
       const h = S.hist
-      push(h.cpu, f.cpu.percent ?? 0)
-      push(h.gpu, f.gpus[0]?.active != null ? f.gpus[0].active * 100 : 0)
-      push(h.watts, sumPower(f.power_w) ?? 0)
-      push(h.rx, f.net.rx_bps ?? 0)
-      push(h.tx, f.net.tx_bps ?? 0)
-      push(h.rd, f.disk.read_bps ?? 0)
-      push(h.wr, f.disk.write_bps ?? 0)
-      push(h.die, f.die.max ?? 0)
+      push(h.cpu, f.cpu.percent ?? null)
+      push(h.gpu, f.gpus[0]?.active != null ? f.gpus[0].active * 100 : null)
+      push(h.watts, sumPower(f.power_w))
+      push(h.rx, f.net.rx_bps ?? null)
+      push(h.tx, f.net.tx_bps ?? null)
+      push(h.rd, f.disk.read_bps ?? null)
+      push(h.wr, f.disk.write_bps ?? null)
+      push(h.die, f.die.max)
     }
   } catch (err) {
-    S.link = /unknown method/i.test(String(err?.message ?? err)) ? 'missing' : 'error'
+    if (!current()) return
+    S.link = /404|not found/i.test(String(err?.message ?? err)) ? 'missing' : 'error'
+    S.frame = null
+    for (const key of Object.keys(S.hist)) if (key !== 'tok') push(S.hist[key], null)
+  } finally {
+    metricsInFlight = false
+    // A switch invalidates the response, but must not start a second sampler
+    // request until the old one settles. Disposal never restarts polling.
+    if (_ctx && consumers && !current()) void pollMetrics()
   }
-  emit()
+  if (current()) emit()
 }
 
 async function pollFleet() {
+  if (!_ctx || fleetInFlight) return
+  fleetInFlight = true
+  const generation = feedGeneration
+  const ctx = _ctx
+  const current = () => ctx === _ctx && generation === feedGeneration
   try {
     const { sessions } = await host.request('session.active_list', {})
-    S.sessions = sessions ?? []
-    const busy = S.sessions.filter(s => s.status !== 'idle').slice(0, 6)
+    if (!current()) return
+    const busy = (sessions ?? []).filter(s => s.status !== 'idle').slice(0, 6)
     const next = {}
     await Promise.all(
       busy.map(async s => {
@@ -199,11 +251,16 @@ async function pollFleet() {
         }
       })
     )
+    if (!current()) return
+    S.sessions = sessions ?? []
     S.subagents = next
   } catch {
     // Gateway not up yet; the radar shows an empty scope until it is.
+  } finally {
+    fleetInFlight = false
+    if (_ctx && pageOpen && !current()) void pollFleet()
   }
-  emit()
+  if (current()) emit()
 }
 
 // One tick per second folds the streamed-character bucket into a smoothed tok/s estimate.
@@ -222,7 +279,7 @@ function tickTokens() {
 function schedule() {
   for (const t of timers) clearInterval(t)
   timers = []
-  if (!consumers) return
+  if (!consumers || !_ctx) return
   const fast = pageOpen > 0
   timers.push(setInterval(pollMetrics, fast ? 1000 : 3000))
   timers.push(setInterval(tickTokens, 1000))
@@ -379,11 +436,15 @@ function fmtDur(s) {
 }
 const POWER_KEYS = ['cpu', 'gpu', 'ane', 'dram']
 const SOC_PEAK_W = 60 // heat-ramp ceiling for package power; Apple Silicon Max parts peak near here
-const sumPower = p => (p && Object.keys(p).length ? POWER_KEYS.reduce((a, k) => a + (p[k] ?? 0), 0) : null)
+const sumPower = p => {
+  const values = POWER_KEYS.map(k => p?.[k]).filter(Number.isFinite)
+  return values.length ? values.reduce((a, v) => a + v, 0) : null
+}
 // SoC die sensors on Apple Silicon are the PMU `tdie*` probes; elsewhere every sensor counts.
 function dieStats(temps = []) {
-  const die = temps.filter(t => /tdie/i.test(t.name))
-  const pool = die.length ? die : temps
+  const valid = (temps ?? []).filter(t => Number.isFinite(t?.celsius))
+  const die = valid.filter(t => /tdie/i.test(t.name))
+  const pool = die.length ? die : valid
   if (!pool.length) return { max: null, avg: null }
   return { max: Math.max(...pool.map(t => t.celsius)), avg: pool.reduce((a, t) => a + t.celsius, 0) / pool.length }
 }
@@ -696,7 +757,8 @@ function Stat({ label, value, unit, tone, big }) {
 function groupCores(cores) {
   const groups = new Map()
   for (const c of cores) {
-    const key = c.name.slice(0, 5) // ECPU0 / PCPU0 / PCPU1
+    const match = String(c.name).match(/^(DIE_\d+_)?[EP]CPU(\d)/)
+    const key = match ? `${match[1] ?? ''}${c.kind}CPU${match[2]}` : `${c.kind ?? '?'}CPU`
     if (!groups.has(key)) groups.set(key, [])
     groups.get(key).push(c)
   }
@@ -704,7 +766,10 @@ function groupCores(cores) {
 }
 
 // IOReport core channel `PCPU130` = P-type, cluster 1, core 3 → "P1·3".
-const coreLabel = name => (/^[EP]CPU\d\d/.test(name) ? `${name[0]}${name[4]}·${name[5]}` : name)
+const coreLabel = core => {
+  const name = String(core.name).replace(/^DIE_\d+_/, '')
+  return /^[EP]CPU\d\d/.test(name) ? `${core.kind}${name[4]}·${name[5]}` : name
+}
 
 const BAND = 14 // solid label strip at a tile's top and bottom; dots never run under text
 
@@ -793,13 +858,16 @@ function DieMap({ frame }) {
 
       groups.forEach(([key, cores], gi) => {
         const y = pad + gi * (rowH + gap)
-        const cl = cpu.clusters.find(c => c.name === (key[4] === '0' ? key.slice(0, 4) : key))
-        const pctT = cl ? `${fmt(cl.active * 100)}%` : null
-        headLine(ctx, ink, pad, y, cpuW, `${key[0]}-CLUSTER ${key[4]}`, cl ? [`${fmt(cl.freq_mhz)} MHz  ${pctT}`, pctT] : [])
+        const cl = cpu.clusters.find(c => c.name === key || c.name === key.replace(/CPU0$/, 'CPU'))
+        const local = key.replace(/^DIE_\d+_/, '')
+        const die = key.match(/^DIE_(\d+)_/)
+        const pctT = cl ? `${fmt(cl.active == null ? null : cl.active * 100)}%` : null
+        const label = `${cores[0].kind ?? '?'}-CLUSTER ${local.slice(4) || '?'}${die ? ` · DIE ${die[1]}` : ''}`
+        headLine(ctx, ink, pad, y, cpuW, label, cl ? [`${fmt(cl.freq_mhz)} MHz  ${pctT}`, pctT] : [])
         const cellW = (cpuW - (cores.length - 1) * 4) / cores.length
         cores.forEach((c, i) =>
           tile(ctx, ink, pad + i * (cellW + 4), y + head, cellW, rowH - head, {
-            name: coreLabel(c.name),
+            name: coreLabel(c),
             pct: c.active == null ? null : c.active * 100,
             foot: c.freq_mhz == null ? DASH : `${fmt(c.freq_mhz)}`,
             density: c.active,
@@ -820,7 +888,7 @@ function DieMap({ frame }) {
         const gridH = colH - head - railH - gap
         const cw = gw / cols
         const chh = gridH / rows
-        const gp = `${fmt((gpu.active ?? 0) * 100)}%`
+        const gp = `${fmt(gpu.active == null ? null : gpu.active * 100)}%`
         headLine(ctx, ink, gx, pad, gw, `GPU ${cores}C`, [
           `${fmt(gpu.freq_mhz)} MHz  ${gp}  ${fmt(gpu.power_w, 1)} W`,
           `${gp}  ${fmt(gpu.power_w, 1)} W`,
@@ -865,7 +933,7 @@ function Scope({ series, max, fmtY, tone }) {
   const ref = useCanvas(
     (ctx, w, h, ink, t) => {
       const data = series.map(s => s.data)
-      const top = max ?? niceMax(Math.max(1, ...data.flat()) * 1.15)
+      const top = max ?? niceMax(Math.max(1, ...data.flat().filter(Number.isFinite)) * 1.15)
       ctx.font = `10px ${ink.mono}`
       // Graticule: 4 horizontal divisions, time ticks every 10 samples.
       ctx.strokeStyle = ink.line2
@@ -897,26 +965,35 @@ function Scope({ series, max, fmtY, tone }) {
         if (d.length < 2) return
         const color = si === 0 ? (tone?.(ink) ?? ink.accent) : ink.fg3
         const x0 = W - (d.length - 1) * step
-        ctx.beginPath()
+        // Each run gets its own stroke AND fill; unknown samples leave gaps.
+        let run = []
+        const drawRun = () => {
+          if (!run.length) return
+          ctx.beginPath()
+          run.forEach(([x, y], i) => i ? ctx.lineTo(x, y) : ctx.moveTo(x, y))
+          ctx.strokeStyle = color
+          ctx.lineWidth = si === 0 ? 1.25 : 1
+          if (si) ctx.setLineDash([2, 2])
+          ctx.stroke()
+          ctx.setLineDash([])
+          if (si === 0) {
+            ctx.lineTo(run[run.length - 1][0], h)
+            ctx.lineTo(run[0][0], h)
+            ctx.closePath()
+            ctx.globalAlpha = 0.07
+            ctx.fillStyle = color
+            ctx.fill()
+            ctx.globalAlpha = 1
+          }
+          run = []
+        }
         d.forEach((v, i) => {
-          const x = x0 + i * step
-          const y = h - 1 - (Math.min(v, top) / top) * (h - 4)
-          i ? ctx.lineTo(x, y) : ctx.moveTo(x, y)
+          if (!Number.isFinite(v)) return drawRun()
+          run.push([x0 + i * step, h - 1 - (Math.min(v, top) / top) * (h - 4)])
         })
-        ctx.strokeStyle = color
-        ctx.lineWidth = si === 0 ? 1.25 : 1
-        if (si) ctx.setLineDash([2, 2])
-        ctx.stroke()
-        ctx.setLineDash([])
-        if (si === 0) {
-          ctx.lineTo(W, h)
-          ctx.lineTo(x0, h)
-          ctx.closePath()
-          ctx.globalAlpha = 0.07
-          ctx.fillStyle = color
-          ctx.fill()
-          ctx.globalAlpha = 1
-          // Head marker with a slow phosphor pulse.
+        drawRun()
+        if (si === 0 && Number.isFinite(d[d.length - 1])) {
+          // Head marker with a slow phosphor pulse, only for a known sample.
           const yv = h - 1 - (Math.min(d[d.length - 1], top) / top) * (h - 4)
           ctx.fillStyle = color
           ctx.beginPath()
@@ -1183,7 +1260,7 @@ function Thermals({ frame }) {
 // ── bars ──────────────────────────────────────────────────────────────────────────────────────
 
 function Meter({ label, used, total, detail, tone }) {
-  const pct = total ? Math.min(1, used / total) : 0
+  const pct = total > 0 && Number.isFinite(used) ? Math.min(1, used / total) : 0
   return jsxs('div', {
     style: { display: 'grid', gap: 4 },
     children: [
@@ -1280,15 +1357,15 @@ function Header({ f }) {
   const h = f?.host
   const cpu = f?.cpu
   const gpu = f?.gpus[0]
-  const e = cpu?.cores.filter(c => c.name[0] === 'E').length
-  const p = cpu?.cores.filter(c => c.name[0] === 'P').length
+  const e = cpu?.cores.filter(c => c.kind === 'E').length
+  const p = cpu?.cores.filter(c => c.kind === 'P').length
   const spec = h
     ? [
         h.cpu_model,
-        h.arch.toUpperCase(),
-        cpu.cores.length ? `${cpu.count_logical}C ${e}E+${p}P` : `${cpu.count_logical}C`,
+        h.arch?.toUpperCase(),
+        cpu.cores.length ? `${fmtInt(cpu.count_logical)}C ${e}E+${p}P` : `${fmtInt(cpu.count_logical)}C`,
         gpu?.cores ? `${gpu.cores}C GPU` : null,
-        fmtBytes(f.memory.total, 0),
+        fmtBytes(f.memory?.total, 0),
         `UP ${fmtDur(h.uptime_s)}`
       ]
         .filter(Boolean)
@@ -1382,7 +1459,7 @@ function MonitoringPage() {
             children: [
               kpiOn(['tok']) ? jsx(Stat, { big: true, label: simmed('≈tok/s'), value: fmt(S.tokRate, S.tokRate < 10 ? 1 : 0) }) : null,
               kpiOn(['cpu']) ? jsx(Stat, { big: true, label: 'cpu', value: fmt(f?.cpu.percent), unit: '%', tone: heatCss(f && f.cpu.percent / 100) }) : null,
-              kpiOn(['gpu']) ? jsx(Stat, { big: true, label: 'gpu', value: fmt(f?.gpus[0] ? f.gpus[0].active * 100 : null), unit: '%', tone: heatCss(f?.gpus[0]?.active) }) : null,
+              kpiOn(['gpu']) ? jsx(Stat, { big: true, label: 'gpu', value: fmt(f?.gpus[0]?.active == null ? null : f.gpus[0].active * 100), unit: '%', tone: heatCss(f?.gpus[0]?.active) }) : null,
               kpiOn(['soc']) ? jsx(Stat, { big: true, label: 'soc power', value: fmt(watts, 1), unit: 'W', tone: heatCss(watts == null ? null : watts / SOC_PEAK_W) }) : null,
               kpiOn(['die']) ? jsx(Stat, { big: true, label: 'die max', value: fmt(f?.die.max, 1), unit: '°C', tone: heatCss(tempT(f?.die.max)) }) : null,
               kpiOn(['mem']) ? jsx(Stat, { big: true, label: 'mem', value: fmt(mem?.percent), unit: '%', tone: heatCss(mem && mem.percent / 100) }) : null,
@@ -1474,8 +1551,8 @@ function MonitoringPage() {
                   ? jsxs('div', {
                       style: { ...MONO, fontSize: 10.5, color: 'var(--ui-text-tertiary)', display: 'flex', justifyContent: 'space-between' },
                       children: [
-                        jsx('span', { children: `hermes pid ${f.process.pid}` }),
-                        jsx('span', { children: `${fmtBytes(f.process.rss)} · ${fmt(f.process.cpu_percent)}% · ${f.process.threads}thr` })
+                        jsx('span', { children: `hermes pid ${f.process?.pid ?? DASH}` }),
+                        jsx('span', { children: `${fmtBytes(f.process?.rss)} · ${fmt(f.process?.cpu_percent)}% · ${f.process?.threads ?? DASH}thr` })
                       ]
                     })
                   : null
@@ -1608,12 +1685,20 @@ export default {
   id: ID,
   register(ctx) {
     _ctx = ctx
+    resetHardware()
+    const stopScope = [host.state.profile, host.state.connectionId, host.state.gateway]
+      .map(atom => atom.listen(resetHardware))
     // Chrome starts HIDDEN. Disk sync restores it (and every built panel) if a build already
     // exists — a reload mid-demo keeps the dashboard as the model left it.
     S.buildDir = ctx.storage.get('buildDir', null)
     void syncBuildFromDisk()
     const stopSync = ctx.setInterval(() => void syncBuildFromDisk(), DISK_SYNC_MS)
     ctx.onDispose(() => {
+      _ctx = null
+      feedGeneration++
+      for (const stop of stopScope) stop()
+      for (const timer of timers) clearInterval(timer)
+      timers = []
       stopSync()
       unregisterChrome()
       closeWorkspace()

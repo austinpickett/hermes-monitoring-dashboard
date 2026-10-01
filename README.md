@@ -1,42 +1,92 @@
 # hermes-monitoring-dashboard
 
-A Hermes desktop plugin: a realtime monitoring page for the machine and the agent fleet. It opens from
-the sidebar (**Monitoring**) and adds a statusbar chip showing tok/s and SoC °C.
+A Hermes plugin with a Python hardware sampler and a desktop monitoring page. The sidebar opens
+**Monitoring**; a statusbar chip shows estimated tok/s and temperature.
 
-- **Silicon:** a die map of CPU clusters and cores, the GPU array, ANE and DRAM, heat-mapped from
-  idle to hot.
-- **Thermal, power, memory, net and disk IO.**
-- **Fleet:** a radar of live sessions and subagents, a tok/s stream, and gateway events.
+- CPU clusters/cores, GPU activity and clocks, thermal and power readings.
+- Memory, swap, storage, disk and network I/O.
+- Live sessions, subagents, gateway events and token throughput.
 
-Data is real or null; unreadable sensors show `—`. **SIM** is an explicitly labelled synthetic fleet
-for demos, and it never fakes hardware.
+Hardware data comes from this package's `/api/plugins/hermes-monitoring-dashboard/metrics` endpoint,
+not a core `system.metrics` RPC. Unreadable readings stay null. **SIM** is a labelled synthetic fleet
+for demos; it never supplies hardware readings.
 
 ## Requirements
 
-Hardware panels read the `system.metrics` gateway RPC. That RPC comes from the hermes-agent branch
-`austin/feat/system-metrics` until it lands. Without it the page shows "no hardware link", and the
-fleet and token panels still work. The Apple Silicon sensors (IOReport + HID, no sudo) are verified
-on an M1 Max.
+Use a Hermes version supporting unified Python + desktop plugins and the desktop SDK's `ctx.rest`.
+No custom Hermes branch or rebuilt desktop bundle is needed for the metrics backend.
+
+The Python side uses `psutil` and FastAPI from the Hermes backend environment. Apple Silicon sensors
+use IOReport/HID through ctypes, without sudo. NVIDIA sensors use the installed driver's NVML library.
+Machines without those sensors still expose the available psutil readings.
+
+The readings describe the **backend host**. For remote connections, install/enable the Python half
+on that host and the desktop half on the client. Installing only the UI does not add remote sensors.
 
 ## Install
 
+Once this version is published, install both components from the repository through Hermes's
+**Install from Git** dialog, or install the backend package with:
+
 ```sh
-ln -s "$PWD/plugin" ~/.hermes/desktop-plugins/hermes-monitoring-dashboard
+hermes plugins install austinpickett/hermes-monitoring-dashboard --enable
 ```
 
-Reload the desktop app (⌘R).
+Enable the desktop half in **Capabilities → Plugins** as well. Restart the backend after installing
+its Python API, and rescan desktop plugins. The two enable choices are separate.
+
+### Existing desktop-only installation
+
+The old installation symlinked `plugin/` into `desktop-plugins/hermes-monitoring-dashboard`.
+This version is a unified package: `plugin.yaml`, `dashboard/`, `desktop/` and `skills/` at the repo root.
+Move the old standalone desktop folder/symlink aside before rescanning. Hermes deliberately does not
+overwrite a marker-less standalone plugin with a package-managed copy. Keep your existing build
+assets; they are not part of the plugin installation.
+
+The composition skill ships at `skills/compose-monitoring-dashboard` and is explicitly registered
+as `hermes-monitoring-dashboard:compose-monitoring-dashboard`. Native plugin skills are available
+through `skills_list`/`skill_view`, but are not automatically included in the model's startup skill
+index. For natural-language discovery ("create a blank dashboard"), add the installed package's
+`skills` directory to `skills.external_dirs`, preserving existing entries, then start a new chat.
+For a default installation that path is `~/.hermes/plugins/hermes-monitoring-dashboard/skills`.
+Replace any obsolete entry pointing into the old desktop-only package with this path.
 
 ## Develop
 
-The browser harness renders `plugin/plugin.js` against real `read_system_metrics()` frames, with no
-Electron:
+Work in a separate checkout/worktree. Stage into an **explicit development home**, not your live home:
 
 ```sh
-scripts/build-vendor.sh    # React bundle for the harness, from a hermes-agent checkout
-HERMES_AGENT_DIR=~/projects/nous/hermes-agent-system-metrics \
-  ~/projects/nous/hermes-agent-system-metrics/.venv/bin/python harness/server.py
-open "http://127.0.0.1:5188/harness/?sim"
+HERMES_HOME=/absolute/path/to/dev-home node scripts/sync-plugin.mjs
+HERMES_HOME=/absolute/path/to/dev-home hermes plugins enable hermes-monitoring-dashboard
 ```
+
+The sync script copies both halves, refuses to overwrite installs owned elsewhere, and does not
+change configuration or touch a legacy standalone desktop installation. Restart that home's backend
+and rescan desktop plugins after staging Python changes.
+
+The browser harness renders `desktop/plugin.js` with the plugin's own backend sampler, without
+Electron or the core metrics branch. Use Python with FastAPI, uvicorn and psutil installed (a Hermes
+test environment works):
+
+```sh
+HERMES_AGENT_DIR=/path/to/hermes-agent scripts/build-vendor.sh
+python harness/server.py
+open "http://127.0.0.1:5188/harness/"
+```
+
+`HERMES_AGENT_DIR` is only needed to borrow React/esbuild for the browser harness. The installed
+plugin uses the desktop app's React. `?sim` enables the labelled synthetic fleet.
 
 `scripts/cdp.mjs` takes screenshots or evaluates JS over CDP:
 `CDP_PORT=9333 node scripts/cdp.mjs shot out.png`, or `node scripts/cdp.mjs eval "<js>"`.
+
+## Safety and limits
+
+The sampler shares one cached window across pollers, owns CPU counter snapshots across threads,
+and degrades unavailable sections independently. Native sample pointers are checked before use;
+reset/shutdown releases owned sensor resources. This is not a process sandbox: native bindings run
+inside the Python backend. Apple private APIs may change with macOS releases.
+
+Apple Silicon live reads and fault/cleanup probes are exercised on a physical Mac. NVIDIA ABI and
+multi-die channel fixtures cover compatibility logic; they do not substitute for physical NVIDIA
+or Ultra hardware verification.

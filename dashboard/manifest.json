@@ -1,0 +1,9 @@
+{
+  "name": "hermes-monitoring-dashboard",
+  "label": "Monitoring",
+  "description": "Plugin-owned host metrics for the Hermes Desktop monitoring panel.",
+  "version": "1.0.0",
+  "tab": {"path": "/monitoring", "hidden": true},
+  "entry": "index.js",
+  "api": "plugin_api.py"
+}

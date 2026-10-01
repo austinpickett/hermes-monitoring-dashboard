@@ -1,5 +1,4 @@
-// Minimal stand-in for `@hermes/plugin-sdk`: just the surface plugin.js imports. host.request goes
-// to harness/server.py, which answers system.metrics from the real sampler on this machine.
+// Minimal public SDK stand-in. Core fleet RPCs and plugin-owned REST stay separate.
 import { useSyncExternalStore } from 'react'
 import { jsx } from 'react/jsx-runtime'
 
@@ -16,7 +15,8 @@ const atom = value => {
 export const useValue = a => useSyncExternalStore(a.listen, a.get)
 
 export const host = {
-  state: { model: atom('claude-opus-5.5') },
+  state: { model: atom('claude-opus-5.5'), profile: atom('default'), connectionId: atom('local'), gateway: atom('open') },
+  notify: message => console.log('[harness] notify', message),
   navigate: path => console.log('[harness] navigate', path),
   async request(method, params = {}) {
     const r = await fetch('/rpc', { method: 'POST', body: JSON.stringify({ method, params }) })

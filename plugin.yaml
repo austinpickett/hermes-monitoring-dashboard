@@ -1,0 +1,13 @@
+name: hermes-monitoring-dashboard
+version: 1.0.0
+description: Live host telemetry and agent activity monitoring for Hermes Desktop.
+author: Austin Pickett
+homepage: https://github.com/austinpickett/hermes-monitoring-dashboard
+provides_tools: []
+provides_hooks: []
+python_dependencies:
+  - psutil>=5.9
+  - fastapi>=0.112.2
+tags:
+  - monitoring
+  - desktop
