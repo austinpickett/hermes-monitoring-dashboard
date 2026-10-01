@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "title": "MY DASHBOARD",
+  "widgets": [
+    { "id": "hello", "type": "text", "title": "Hello", "text": "Hello world ☺", "accent": "green", "order": 0 },
+    { "id": "local-clock", "type": "clock", "title": "Here & now", "order": 1 },
+    { "id": "host-uptime", "type": "uptime", "title": "Backend uptime", "accent": "yellow", "order": 2 },
+    { "id": "month", "type": "calendar", "title": "This month", "width": 4, "order": 3 },
+    { "id": "activity", "type": "feed", "title": "Feed", "width": 8, "order": 4 }
+  ]
+}
