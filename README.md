@@ -1,4 +1,6 @@
-# hermes-monitoring-dashboard
+# Hermes Monitoring Dashboard
+
+![Blue cyanotype-style monitoring instrument with a circular grid and pointer](assets/hermes-cyanotype.jpg)
 
 A Hermes plugin with a Python hardware sampler and a desktop monitoring page. The sidebar opens
 **Monitoring**; a statusbar chip shows estimated tok/s and temperature.
@@ -51,6 +53,25 @@ index. For natural-language discovery ("create a blank dashboard"), add the inst
 For a default installation that path is `~/.hermes/plugins/hermes-monitoring-dashboard/skills`.
 Replace any obsolete entry pointing into the old desktop-only package with this path.
 
+## Configurable widgets
+
+User configuration lives in `~/monitoring-dashboard/dashboard.json`, **outside the plugin
+installation**, on the desktop device. See [`examples/dashboard.json`](examples/dashboard.json)
+and the [composition skill](skills/compose-monitoring-dashboard/SKILL.md) for the version 1 schema
+and safe prompt-driven edits. A config alone reveals Monitoring; it is polled every two seconds.
+Titles, accents, plain text/emoji, local clock/date, backend-host uptime, month calendar, existing
+monitoring panels, widths and order are configurable in one dashboard. No custom JavaScript runs.
+
+A valid config takes precedence over legacy `page.html` / `panel-*.html` markers. Removing it
+returns to those markers. Invalid JSON/schema retains the last valid config **in memory for this
+plugin session**, with an error banner; on restart an invalid file falls back to marker mode until
+repaired. Unknown widget types get an unsupported card, not code execution. Demo Reset is disabled
+for configured/error states. The dashboard reads config but never rewrites user data.
+
+Local clock/calendar belong to the desktop's timezone; uptime and hardware describe the backend
+host, which may be remote. The calendar has no synthetic events or connected accounts. Edits are
+currently through JSON or Hermes prompts, not an in-card form editor.
+
 ## Develop
 
 Work in a separate checkout/worktree. Stage into an **explicit development home**, not your live home:
@@ -76,6 +97,13 @@ open "http://127.0.0.1:5188/harness/"
 
 `HERMES_AGENT_DIR` is only needed to borrow React/esbuild for the browser harness. The installed
 plugin uses the desktop app's React. `?sim` enables the labelled synthetic fleet.
+
+Preview configured widgets with `/harness/?widgets`, an empty config with `?widgets=empty`,
+and an invalid config with `?widgets=invalid`. The default URL still exercises legacy markers.
+These are explicit UI fixtures; hardware remains real unless `?fixture=...` is requested.
+`window.harness.setConfig(objectOrText)` changes the in-memory file seam for live polling checks;
+`setConfig(null)` restores marker mode. No live user config is touched.
+Focused checks: `node --test tests/ui/widgets.mjs tests/ui/metrics.mjs`.
 
 `scripts/cdp.mjs` takes screenshots or evaluates JS over CDP:
 `CDP_PORT=9333 node scripts/cdp.mjs shot out.png`, or `node scripts/cdp.mjs eval "<js>"`.

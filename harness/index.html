@@ -50,16 +50,21 @@
       const disposers = []
       const events = new Set()
       const builtFiles = ['page', 'panel-throughput', 'panel-silicon', 'panel-thermal', 'panel-fleet', 'panel-wire', 'panel-memory', 'panel-net', 'panel-disk', 'panel-power']
-      let previewBuilt = !new URLSearchParams(location.search).has('empty')
+      const params = new URLSearchParams(location.search)
+      let configText = params.has('widgets') ? await (await fetch('/examples/dashboard.json')).text() : null
+      if (params.get('widgets') === 'empty') configText = JSON.stringify({ version: 1, widgets: [] })
+      if (params.get('widgets') === 'invalid') configText = '{invalid'
+      let previewBuilt = !params.has('empty')
       const storage = new Map(previewBuilt ? [['buildDir', 'harness/monitoring-dashboard']] : [])
       // Preview the composed layout through the same disk-reconciliation seam,
       // without inventing gateway traffic or hardware readings.
       window.hermesDesktop = {
-        readDir: async () => ({ entries: previewBuilt ? builtFiles.map(file => ({ name: `${file}.html`, isDirectory: false })) : [] }),
-        trashPath: async () => { previewBuilt = false }
+        readDir: async () => ({ entries: [...(previewBuilt ? builtFiles.map(file => ({ name: `${file}.html`, isDirectory: false })) : []), ...(configText !== null ? [{ name: 'dashboard.json', isDirectory: false }] : [])] }),
+        readFileText: async () => ({ text: configText, binary: false, truncated: false }),
+        trashPath: async () => { previewBuilt = false; configText = null }
       }
       const bar = createRoot(document.getElementById('bar'))
-      const page = createRoot(document.getElementById('root'))
+      const page = createRoot(document.getElementById('root'), { onUncaughtError: error => console.error(error.stack || String(error)) })
       const refreshBar = () => bar.render(byArea['statusbar.right']?.[0]?.render() ?? null)
       const register = c => {
         ;(byArea[c.area] ??= []).push(c)
@@ -99,6 +104,10 @@
       page.render(byArea.routes[0].render())
       window.harness = {
         host,
+        setConfig: value => { configText = value === null ? null : typeof value === 'string' ? value : JSON.stringify(value) },
+        getConfig: () => configText,
+        setMarkers: value => { previewBuilt = value },
+        emit: event => events.forEach(fn => fn(event)),
         dispose: () => {
           disposers.forEach(fn => fn())
           page.unmount()

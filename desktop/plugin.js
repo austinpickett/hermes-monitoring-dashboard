@@ -47,6 +47,8 @@ const S = {
   // Build flow: the page opens as an empty frame; Hermes composes it panel-by-panel with
   // file tools, guided by the plugin's shipped skill. A step goes 'building' the moment its
   // tool call starts and 'built' when it completes. Reset returns to the empty frame.
+  config: null, // last valid declarative config; null selects legacy markers
+  configError: null,
   built: [], // ordered ids of built steps
   building: null, // id of the step whose tool call is running
   builtAt: 0,
@@ -92,29 +94,68 @@ function markStepBuilt(id) {
 // plugin reload or app restart mid-demo. Tool events still drive the instant reveal; this
 // reconciles. The build dir is learned from the model's own write (tool.complete carries the
 // resolved path), so nothing about the machine is hardcoded.
+let diskSyncInFlight = false
+let diskGeneration = 0
+
 async function syncBuildFromDisk() {
   const fs = desktopFs()
-  if (!S.buildDir || !fs?.readDir) return
-  let names = []
+  if (!S.buildDir || !fs?.readDir || diskSyncInFlight) return
+  diskSyncInFlight = true
+  const ctx = _ctx
+  const dir = S.buildDir
+  const generation = diskGeneration
+  const current = () => ctx === _ctx && dir === S.buildDir && generation === diskGeneration
   try {
-    const r = await fs.readDir(S.buildDir)
-    names = (r?.entries ?? []).filter(e => !e.isDirectory).map(e => e.name)
-  } catch {}
-  const ids = ALL_STEPS.filter(s => names.includes(s.file)).map(s => s.id)
-  if (ids.length === S.built.length && ids.every(id => S.built.includes(id))) return
-  S.built = ids
-  if (S.built.includes('chrome')) registerChrome({ reveal: false })
-  else unregisterChrome()
-  emit()
+    const r = await fs.readDir(dir)
+    if (!current()) return
+    if (r?.error && r.error !== 'ENOENT') throw new Error(r.error)
+    const names = (r?.entries ?? []).filter(e => !e.isDirectory).map(e => e.name)
+    if (names.includes(CONFIG_FILE)) {
+      try {
+        if (!fs.readFileText) throw new Error('This desktop cannot read dashboard.json; update Hermes.')
+        const text = await fs.readFileText(`${dir}/${CONFIG_FILE}`)
+        if (!current()) return
+        if (text?.truncated || text?.binary) throw new Error('Configuration must be complete, non-binary JSON text')
+        S.config = parseDashboardConfig(typeof text === 'string' ? text : text?.text)
+        S.configError = null
+      } catch (err) {
+        if (!current()) return
+        S.configError = `dashboard.json: ${err?.message ?? err}. ${S.config ? 'Showing the last valid configuration.' : 'Showing legacy panels until the configuration is fixed.'}`
+      }
+    } else {
+      S.config = null
+      S.configError = null
+    }
+    S.built = ALL_STEPS.filter(s => names.includes(s.file)).map(s => s.id)
+    if (S.config || S.configError || S.built.includes('chrome')) registerChrome({ reveal: false })
+    else unregisterChrome()
+    emit()
+  } catch (err) {
+    if (!current()) return
+    // A failed listing is not evidence that files were deleted.
+    S.configError = `Cannot read dashboard folder: ${err?.message ?? err}. Keeping the last dashboard.`
+    emit()
+  } finally {
+    diskSyncInFlight = false
+  }
 }
 
 async function resetBuild() {
+  if (diskSyncInFlight) return
+  await syncBuildFromDisk()
+  // A config is user data, not a disposable demo. Never trash it via demo Reset.
+  if (S.config || S.configError) {
+    host.notify({ kind: 'info', message: 'To clear configured widgets, edit dashboard.json to set widgets to []. Your files have not been removed.' })
+    return
+  }
+  diskGeneration++
   const fs = desktopFs()
   if (S.buildDir && fs?.trashPath) {
     try {
       await fs.trashPath(S.buildDir)
     } catch (err) {
       host.notify({ kind: 'error', message: `Monitoring reset: couldn't remove ${S.buildDir} (${err?.message ?? err})` })
+      return
     }
   }
   S.built = []
@@ -130,6 +171,7 @@ function buildStepFromTool(name, args) {
   const path = String(args?.path ?? '')
   if (!path.includes(BUILD_DIR_HINT)) return null
   const file = path.split(/[\\/]/).pop() || path
+  if (file === CONFIG_FILE) return { id: 'config', file: CONFIG_FILE }
   if (path.endsWith(CHROME_STEP.file)) return CHROME_STEP
   return BUILD_STEPS.find(s => path.endsWith(s.file)) || null
 }
@@ -351,6 +393,9 @@ function onGatewayEvent(ev) {
         if (p.error || p.result?.error) {
           if (S.building === step.id) S.building = null
           emit()
+        } else if (step.id === 'config') {
+          S.building = null
+          void syncBuildFromDisk().then(() => { if (_ctx && S.config) registerChrome({ reveal: true }) })
         } else markStepBuilt(step.id)
       }
       break
@@ -694,8 +739,9 @@ const LABEL = {
   color: 'var(--ui-text-tertiary)'
 }
 
-function Panel({ title, meta, children, style, bodyStyle }) {
+function Panel({ title, meta, children, style, bodyStyle, accent, widgetId }) {
   return jsxs('section', {
+    'data-widget-id': widgetId,
     style: {
       display: 'flex',
       flexDirection: 'column',
@@ -708,7 +754,7 @@ function Panel({ title, meta, children, style, bodyStyle }) {
       jsxs('header', {
         style: { display: 'flex', alignItems: 'baseline', gap: 10, padding: '7px 0 6px', ...LABEL },
         children: [
-          jsxs('span', { style: { color: 'var(--ui-text-secondary)' }, children: ['//', title] }),
+          jsxs('span', { style: { color: accent ?? 'var(--ui-text-secondary)', overflowWrap: 'anywhere' }, children: ['//', title] }),
           meta ? jsx('span', { style: { marginLeft: 'auto', color: 'var(--ui-text-quaternary)' }, children: meta }) : null
         ]
       }),
@@ -1301,7 +1347,7 @@ function EventLog() {
   useStore()
   const rows = S.log.slice(0, 60)
   if (!rows.length)
-    return jsx('div', { style: { ...MONO, fontSize: 10.5, color: 'var(--ui-text-quaternary)' }, children: 'no gateway traffic yet' })
+    return jsx('div', { style: { ...MONO, fontSize: 10.5, color: 'var(--ui-text-quaternary)' }, children: 'no activity yet' })
   return jsx('div', {
     style: {
       ...MONO,
@@ -1377,14 +1423,14 @@ function Header({ f }) {
       jsxs('div', {
         style: { display: 'flex', alignItems: 'baseline', gap: 12, minWidth: 0 },
         children: [
-          jsx('span', { style: { ...MONO, fontSize: 13, letterSpacing: '0.14em', color: 'var(--ui-text-primary)' }, children: 'MONITORING' }),
+          jsx('span', { style: { ...MONO, fontSize: 13, letterSpacing: '0.14em', color: 'var(--ui-text-primary)' }, children: S.config?.title ?? 'MONITORING' }),
           jsx('span', { style: { ...LABEL, color: 'var(--ui-text-tertiary)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }, children: spec })
         ]
       }),
       jsxs('div', {
         style: { marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 14 },
         children: [
-          S.sim ? simmed(jsx('span', { style: { ...LABEL, color: 'var(--ui-yellow)' }, children: 'synthetic fleet · hardware live' })) : null,
+          S.sim ? simmed(jsx('span', { style: { ...LABEL, color: 'var(--ui-yellow)' }, children: 'synthetic sessions · hardware live' })) : null,
           jsx(LinkState, {}),
           jsx('span', { style: { ...MONO, fontSize: 11, color: 'var(--ui-text-secondary)' }, children: `${utc()}Z` }),
           jsx(Button, {
@@ -1394,7 +1440,7 @@ function Header({ f }) {
             onClick: () => setSim(!S.sim),
             children: S.sim ? 'SIM on' : 'SIM off'
           }),
-          S.built.length || S.building
+          !S.config && !S.configError && (S.built.length || S.building)
             ? jsx(Button, {
                 size: 'xs',
                 variant: 'ghost',
@@ -1409,6 +1455,186 @@ function Header({ f }) {
   })
 }
 
+// Declarative widget contract. Extend this registry with trusted renderers, never code from JSON.
+const CONFIG_FILE = 'dashboard.json'
+const ACCENTS = { default: 'var(--ui-accent)', green: 'var(--ui-green)', yellow: 'var(--ui-yellow)', red: 'var(--ui-red)' }
+const widgetNote = text => jsx('div', { style: { ...MONO, fontSize: 11, color: 'var(--ui-text-tertiary)', lineHeight: 1.6 }, children: text })
+const widgetValue = text => jsx('div', { style: { ...MONO, fontSize: 30, color: 'var(--ui-accent)', overflowWrap: 'anywhere', whiteSpace: 'pre-wrap' }, children: text })
+const WIDGET_TYPES = new Map([
+  ...BUILD_STEPS.map(s => [s.id === 'wire' ? 'feed' : s.id, { metric: s.id, title: s.id === 'wire' ? 'Feed' : s.id === 'fleet' ? 'Sessions' : s.id }]),
+  ['text', { title: 'Note', render: w => w.text ? widgetValue(w.text) : widgetNote('No text yet. Ask Hermes to edit this widget.') }],
+  ['clock', { title: 'Local time', render: (_w, { now }) => jsxs('div', { children: [widgetValue(now.toLocaleTimeString()), widgetNote(`${now.toLocaleDateString(undefined, { dateStyle: 'full' })} · local time`)] }) }],
+  ['date', { title: 'Local date', render: (_w, { now }) => jsxs('div', { children: [widgetValue(now.toLocaleDateString(undefined, { dateStyle: 'long' })), widgetNote('Local calendar date')] }) }],
+  ['uptime', { title: 'Backend uptime', render: (_w, { f }) => jsxs('div', { children: [widgetValue(fmtDur(Number.isFinite(f?.host?.uptime_s) ? f.host.uptime_s : null)), widgetNote('Backend host uptime · not local clock time'), !Number.isFinite(f?.host?.uptime_s) ? widgetNote('Uptime unavailable from the backend.') : null] }) }],
+  ['calendar', { title: 'Month calendar', render: (_w, { now }) => jsx(MonthCalendar, { now }) }]
+])
+
+function parseDashboardConfig(text) {
+  if (typeof text !== 'string' || text.length > 262144) throw new Error('Expected a JSON text file up to 262144 characters')
+  const config = JSON.parse(text)
+  if (!config || config.version !== 1 || !Array.isArray(config.widgets)) throw new Error('Expected version: 1 and a widgets array')
+  if (config.widgets.length > 64) throw new Error('At most 64 widgets are supported')
+  if (config.title !== undefined && (typeof config.title !== 'string' || config.title.length > 120)) throw new Error('Dashboard title must be text up to 120 characters')
+  const ids = new Set()
+  for (const w of config.widgets) {
+    if (!w || typeof w !== 'object' || !/^[a-zA-Z0-9_-]{1,64}$/.test(w.id ?? '') || typeof w.id !== 'string' || ids.has(w.id)) throw new Error('Widgets need unique IDs (letters, digits, _ or -, up to 64 characters)')
+    ids.add(w.id)
+    if (typeof w.type !== 'string' || !/^[a-zA-Z0-9_-]{1,64}$/.test(w.type)) throw new Error(`Widget ${w.id}: type must be a short identifier`)
+    if (w.title !== undefined && (typeof w.title !== 'string' || w.title.length > 120)) throw new Error(`Widget ${w.id}: title must be text up to 120 characters`)
+    if (w.text !== undefined && (typeof w.text !== 'string' || w.text.length > 10000)) throw new Error(`Widget ${w.id}: text must be text up to 10000 characters`)
+    if (w.accent !== undefined && !(typeof w.accent === 'string' && (Object.hasOwn(ACCENTS, w.accent) || /^#[0-9a-f]{6}$/i.test(w.accent)))) throw new Error(`Widget ${w.id}: accent must be default, green, yellow, red, or #RRGGBB`)
+    if (w.order !== undefined && !Number.isFinite(w.order)) throw new Error(`Widget ${w.id}: order must be a finite number`)
+    if (w.width !== undefined && ![3, 4, 6, 8, 12].includes(w.width)) throw new Error(`Widget ${w.id}: width must be 3, 4, 6, 8, or 12`)
+  }
+  return config // retain unrelated settings/fields, including future widget types
+}
+
+function orderedWidgets(config) {
+  return config.widgets.map((widget, index) => ({ widget, index }))
+    .sort((a, b) => (a.widget.order ?? a.index) - (b.widget.order ?? b.index) || a.index - b.index)
+    .map(item => item.widget)
+}
+
+function monthDays(now) {
+  const year = now.getFullYear(), month = now.getMonth()
+  const first = new Date(year, month, 1).getDay()
+  const count = new Date(year, month + 1, 0).getDate()
+  return Array.from({ length: Math.ceil((first + count) / 7) * 7 }, (_, i) => i >= first && i < first + count ? i - first + 1 : null)
+}
+
+function MonthCalendar({ now }) {
+  return jsxs('div', { style: { ...MONO, maxWidth: 400, margin: '0 auto', width: '100%' }, children: [
+    jsx('div', { style: { fontSize: 15, padding: '6px 0 12px', color: 'var(--ui-text-secondary)' }, children: now.toLocaleDateString(undefined, { month: 'long', year: 'numeric' }) }),
+    jsx('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(7, 1fr)', textAlign: 'center', gap: 3, fontSize: 12 }, children: [
+      ...['Su', 'Mo', 'Tu', 'We', 'Th', 'Fr', 'Sa'].map(day => jsx('span', { style: { ...LABEL, paddingBottom: 6 }, children: day }, day)),
+      ...monthDays(now).map((day, i) => jsx('span', {
+        'aria-current': day === now.getDate() ? 'date' : undefined,
+        style: { padding: '5px 0', color: day === now.getDate() ? 'var(--ui-accent)' : 'var(--ui-text-secondary)', background: day === now.getDate() ? 'var(--ui-control-active-background)' : undefined },
+        children: day
+      }, i))
+    ] }),
+    widgetNote('Local date · today highlighted · no connected events')
+  ] })
+}
+
+function ConfiguredWidgets({ config, mode, f, model }) {
+  const now = new Date()
+  const metrics = metricPanels({ f, model, span: () => ({}) })
+  if (!config.widgets.length) return widgetNote('No widgets yet. Ask Hermes to add text, a clock, a calendar, backend uptime, or a monitoring panel to dashboard.json.')
+  return jsx('div', {
+    style: { display: 'grid', gridTemplateColumns: 'repeat(12, minmax(0, 1fr))', gridAutoRows: 'minmax(260px, auto)', gap: '16px 20px' },
+    children: orderedWidgets(config).map(w => {
+      const definition = WIDGET_TYPES.get(w.type)
+      const metric = definition?.metric ? metrics[definition.metric]() : null
+      const accent = w.accent ? (ACCENTS[w.accent] ?? w.accent) : 'var(--ui-accent)'
+      return jsx(Panel, {
+        ...metric?.props,
+        title: w.title ?? definition?.title ?? w.type,
+        meta: metric?.props.meta ?? (w.type === 'uptime' ? 'backend host' : ['clock', 'date', 'calendar'].includes(w.type) ? 'local device' : null),
+        style: { gridColumn: `span ${mode === 'narrow' ? 12 : mode === 'mid' ? Math.max(6, w.width ?? 4) : w.width ?? 4}`, ...(w.accent && w.accent !== 'default' ? { '--ui-accent': accent } : {}) },
+        accent: w.accent ? accent : undefined,
+        widgetId: w.id,
+        children: metric?.props.children ?? (definition?.render ? definition.render(w, { f, now }) : widgetNote(`Unsupported widget type “${w.type}”. Its configuration is preserved. Custom JavaScript is not enabled.`))
+      }, w.id)
+    })
+  })
+}
+
+function metricPanels({ f, model, span }) {
+  const u = S.usage
+  const watts = f ? sumPower(f.power_w) : null
+  const mem = f?.memory
+  const vol = f?.disk.volumes[0]
+  return {
+    silicon: () => jsx(Panel, {
+      title: S.building === 'silicon' ? 'silicon · composing…' : 'silicon',
+      meta: f ? jsxs('span', { style: { display: 'inline-flex', gap: 14 }, children: [f.cpu.cores.length ? 'ioreport · dvfs · 1 hz' : 'psutil · 1 hz', jsx(HeatKey, { lo: 'idle', hi: '100%' })] }) : null,
+      style: span(8, 12),
+      children: jsx(DieMap, { frame: f })
+    }),
+    thermal: () => jsx(Panel, {
+      title: 'thermal',
+      meta: f ? jsxs('span', { style: { display: 'inline-flex', gap: 14 }, children: [`${f.temps.length} sensors · avg ${fmt(f.die.avg, 1)}°`, jsx(HeatKey, { lo: '35°', hi: '100°' })] }) : null,
+      style: span(4, 6),
+      children: jsx(Thermals, { frame: f })
+    }),
+    fleet: () => jsx(Panel, {
+      title: 'Sessions',
+      meta: simmed(`${S.sessions.length + S.simSessions.length} contacts`),
+      style: span(4, 6),
+      children: jsx(Radar, {})
+    }),
+    throughput: () => jsxs(Panel, {
+      title: S.building === 'throughput' ? 'throughput · composing…' : 'throughput',
+      meta: simmed(model ? String(model).toLowerCase() : null),
+      style: span(4, 6),
+      bodyStyle: { display: 'grid', gridTemplateRows: '1fr 1fr auto', gap: 10 },
+      children: [
+        jsxs('div', { style: SCOPE_BOX, children: [scopeLabel('≈tok/s stream'), jsx(Scope, { series: [{ data: S.hist.tok }], fmtY: v => fmt(v) })] }),
+        jsxs('div', { style: SCOPE_BOX, children: [scopeLabel('cpu % ─  gpu % ┄'), jsx(Scope, { series: [{ data: S.hist.cpu }, { data: S.hist.gpu }], max: 100, fmtY: v => `${v}%` })] }),
+        // Session usage appears once a real session reports it; SIM never fakes usage.
+        u
+          ? jsxs('div', {
+              style: { display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 10 },
+              children: [
+                jsx(Stat, { label: 'context', value: fmt(u.context_percent), unit: '%' }),
+                jsx(Stat, { label: 'cache hit', value: fmt(u.cache_hit_pct), unit: '%' }),
+                jsx(Stat, { label: 'avg tps', value: fmt(u.avg_tps, 1) }),
+                jsx(Stat, { label: 'out tok', value: u.output != null ? fmtInt(u.output) : DASH })
+              ]
+            })
+          : jsx('div', { style: { ...LABEL, color: 'var(--ui-text-quaternary)' }, children: 'session usage · awaiting a live turn' })
+      ]
+    }),
+    wire: () => jsx(Panel, { title: 'feed', meta: simmed('Hermes activity'), style: span(4, 6), children: jsx(EventLog, {}) }),
+    power: () => jsxs(Panel, {
+      title: S.building === 'power' ? 'power · composing…' : 'power',
+      meta: watts != null ? `soc ${fmt(watts, 2)}W` : null,
+      style: span(3, 6),
+      bodyStyle: { display: 'grid', gridTemplateRows: '1fr auto', gap: 8 },
+      children: [
+        jsx('div', { style: { minHeight: 0 }, children: jsx(Scope, { series: [{ data: S.hist.watts }], fmtY: v => `${v}W` }) }),
+        jsx('div', {
+          style: { display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 8 },
+          children: POWER_KEYS.map(k => jsx(Stat, { label: k, value: fmt(f?.power_w[k], 2), unit: 'W' }, k))
+        })
+      ]
+    }),
+    memory: () => jsxs(Panel, {
+      title: S.building === 'memory' ? 'memory · composing…' : 'memory',
+      meta: mem ? fmtBytes(mem.total, 0) : null,
+      style: span(3, 6),
+      bodyStyle: { display: 'grid', alignContent: 'start', gap: 12 },
+      children: [
+        jsx(Meter, { label: 'ram', used: mem?.used, total: mem?.total, detail: mem ? `${fmtBytes(mem.used)} / ${fmtBytes(mem.total, 0)}` : DASH }),
+        jsx(Meter, { label: 'swap', used: mem?.swap_used, total: mem?.swap_total, detail: mem ? `${fmtBytes(mem.swap_used)} / ${fmtBytes(mem.swap_total, 0)}` : DASH }),
+        vol ? jsx(Meter, { label: `disk ${vol.mount}`, used: vol.used, total: vol.total, detail: `${fmtBytes(vol.used, 0)} / ${fmtBytes(vol.total, 0)}` }) : null,
+        f
+          ? jsxs('div', {
+              style: { ...MONO, fontSize: 10.5, color: 'var(--ui-text-tertiary)', display: 'flex', justifyContent: 'space-between' },
+              children: [
+                jsx('span', { children: `hermes pid ${f.process?.pid ?? DASH}` }),
+                jsx('span', { children: `${fmtBytes(f.process?.rss)} · ${fmt(f.process?.cpu_percent)}% · ${f.process?.threads ?? DASH}thr` })
+              ]
+            })
+          : null
+      ]
+    }),
+    net: () => jsx(Panel, {
+      title: 'net',
+      meta: f ? `↓${fmtRate(f.net.rx_bps)}  ↑${fmtRate(f.net.tx_bps)}` : null,
+      style: span(3, 6),
+      children: jsx(Scope, { series: [{ data: S.hist.rx }, { data: S.hist.tx }], fmtY: v => `${fmtBytes(v, 0)}/s` })
+    }),
+    disk: () => jsx(Panel, {
+      title: 'disk io',
+      meta: f ? `r ${fmtRate(f.disk.read_bps)}  w ${fmtRate(f.disk.write_bps)}` : null,
+      style: span(3, 6),
+      children: jsx(Scope, { series: [{ data: S.hist.rd }, { data: S.hist.wr }], fmtY: v => `${fmtBytes(v, 0)}/s` })
+    }),
+  }
+}
+
 function MonitoringPage() {
   useFeed(true)
   useStore()
@@ -1416,12 +1642,10 @@ function MonitoringPage() {
   const model = useValue(host.state.model)
   const f = S.frame
   const hardware = S.link === 'ok' && f
-  const u = S.usage
   const busy = S.sessions.filter(s => s.status !== 'idle').length + S.simSessions.filter(s => s.status !== 'idle').length
   const subs = Object.values(S.subagents).reduce((a, l) => a + l.length, 0) + S.simSessions.reduce((a, s) => a + s.subs, 0)
   const watts = f ? sumPower(f.power_w) : null
   const mem = f?.memory
-  const vol = f?.disk.volumes[0]
   const [pageRef, width] = useWidth()
   // wide fills one screen; mid pairs panels; narrow (a side pane) stacks them. Both of those scroll.
   const mode = width >= 1100 ? 'wide' : width >= 700 ? 'mid' : 'narrow'
@@ -1439,7 +1663,11 @@ function MonitoringPage() {
     style: { height: '100%', overflow: 'auto', padding: '14px 18px 18px', color: 'var(--ui-text-primary)', display: 'flex', flexDirection: 'column' },
     children: [
       jsx(Header, { f }),
-      empty
+      S.configError ? jsx('div', { role: 'alert', style: { ...MONO, color: 'var(--ui-yellow)', fontSize: 12, padding: '8px 0 16px' }, children: S.configError }) : null,
+      S.config ? jsxs('div', { children: [
+        jsx('div', { style: { ...LABEL, marginBottom: 14 }, children: 'dashboard.json · ask Hermes to edit titles, colors, content, or order' }),
+        jsx(ConfiguredWidgets, { config: S.config, mode, f, model })
+      ] }) : empty
         ? jsx(EmptyFrame, {})
         : jsxs('div', {
         style: {
@@ -1454,7 +1682,7 @@ function MonitoringPage() {
         },
         children: [
           // Row 1: headline numbers — each unlocks with its build step.
-          jsx('div', {
+          jsxs('div', {
             style: { gridColumn: 'span 12', display: 'grid', gridTemplateColumns: `repeat(${mode === 'wide' ? 8 : 4}, minmax(0, 1fr))`, gap: 16, borderTop: '1px solid var(--ui-stroke-secondary)', paddingTop: 10 },
             children: [
               kpiOn(['tok']) ? jsx(Stat, { big: true, label: simmed('≈tok/s'), value: fmt(S.tokRate, S.tokRate < 10 ? 1 : 0) }) : null,
@@ -1466,115 +1694,12 @@ function MonitoringPage() {
               kpiOn(['agents']) ? jsx(Stat, { big: true, label: simmed('agents'), value: String(busy), unit: subs ? `+${subs} sub` : undefined }) : null,
               kpiOn(['tools']) ? jsx(Stat, { big: true, label: simmed('tools/min'), value: String(S.toolsPerMin.length) }) : null
             ]
-          }),
+          }, 'kpis'),
 
-          // Row 2: silicon + thermal.
-          has('silicon')
-            ? jsx(Panel, {
-              title: S.building === 'silicon' ? 'silicon · composing…' : 'silicon',
-              meta: f ? jsxs('span', { style: { display: 'inline-flex', gap: 14 }, children: [f.cpu.cores.length ? 'ioreport · dvfs · 1 hz' : 'psutil · 1 hz', jsx(HeatKey, { lo: 'idle', hi: '100%' })] }) : null,
-              style: span(8, 12),
-              children: jsx(DieMap, { frame: f })
-            })
-            : null,
-          has('thermal')
-            ? jsx(Panel, {
-              title: 'thermal',
-              meta: f ? jsxs('span', { style: { display: 'inline-flex', gap: 14 }, children: [`${f.temps.length} sensors · avg ${fmt(f.die.avg, 1)}°`, jsx(HeatKey, { lo: '35°', hi: '100°' })] }) : null,
-              style: span(4, 6),
-              children: jsx(Thermals, { frame: f })
-            })
-            : null,
-
-          // Row 3: fleet + throughput + wire.
-          has('fleet')
-            ? jsx(Panel, {
-              title: 'fleet',
-              meta: simmed(`${S.sessions.length + S.simSessions.length} contacts`),
-              style: span(4, 6),
-              children: jsx(Radar, {})
-            })
-            : null,
-          has('throughput')
-            ? jsxs(Panel, {
-              title: S.building === 'throughput' ? 'throughput · composing…' : 'throughput',
-              meta: simmed(model ? String(model).toLowerCase() : null),
-              style: span(4, 6),
-              bodyStyle: { display: 'grid', gridTemplateRows: '1fr 1fr auto', gap: 10 },
-              children: [
-                jsxs('div', { style: SCOPE_BOX, children: [scopeLabel('≈tok/s stream'), jsx(Scope, { series: [{ data: S.hist.tok }], fmtY: v => fmt(v) })] }),
-                jsxs('div', { style: SCOPE_BOX, children: [scopeLabel('cpu % ─  gpu % ┄'), jsx(Scope, { series: [{ data: S.hist.cpu }, { data: S.hist.gpu }], max: 100, fmtY: v => `${v}%` })] }),
-                // Session usage appears once a real session reports it; SIM never fakes usage.
-                u
-                  ? jsxs('div', {
-                      style: { display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 10 },
-                      children: [
-                        jsx(Stat, { label: 'context', value: fmt(u.context_percent), unit: '%' }),
-                        jsx(Stat, { label: 'cache hit', value: fmt(u.cache_hit_pct), unit: '%' }),
-                        jsx(Stat, { label: 'avg tps', value: fmt(u.avg_tps, 1) }),
-                        jsx(Stat, { label: 'out tok', value: u.output != null ? fmtInt(u.output) : DASH })
-                      ]
-                    })
-                  : jsx('div', { style: { ...LABEL, color: 'var(--ui-text-quaternary)' }, children: 'session usage · awaiting a live turn' })
-              ]
-            })
-            : null,
-          has('wire') ? jsx(Panel, { title: 'wire', meta: simmed('gateway events'), style: span(4, 6), children: jsx(EventLog, {}) }) : null,
-
-          // Row 4: power, memory, net, disk io.
-          has('power')
-            ? jsxs(Panel, {
-              title: S.building === 'power' ? 'power · composing…' : 'power',
-              meta: watts != null ? `soc ${fmt(watts, 2)}W` : null,
-              style: span(3, 6),
-              bodyStyle: { display: 'grid', gridTemplateRows: '1fr auto', gap: 8 },
-              children: [
-                jsx('div', { style: { minHeight: 0 }, children: jsx(Scope, { series: [{ data: S.hist.watts }], fmtY: v => `${v}W` }) }),
-                jsx('div', {
-                  style: { display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 8 },
-                  children: POWER_KEYS.map(k => jsx(Stat, { label: k, value: fmt(f?.power_w[k], 2), unit: 'W' }, k))
-                })
-              ]
-            })
-            : null,
-          has('memory')
-            ? jsxs(Panel, {
-              title: S.building === 'memory' ? 'memory · composing…' : 'memory',
-              meta: mem ? fmtBytes(mem.total, 0) : null,
-              style: span(3, 6),
-              bodyStyle: { display: 'grid', alignContent: 'start', gap: 12 },
-              children: [
-                jsx(Meter, { label: 'ram', used: mem?.used, total: mem?.total, detail: mem ? `${fmtBytes(mem.used)} / ${fmtBytes(mem.total, 0)}` : DASH }),
-                jsx(Meter, { label: 'swap', used: mem?.swap_used, total: mem?.swap_total, detail: mem ? `${fmtBytes(mem.swap_used)} / ${fmtBytes(mem.swap_total, 0)}` : DASH }),
-                vol ? jsx(Meter, { label: `disk ${vol.mount}`, used: vol.used, total: vol.total, detail: `${fmtBytes(vol.used, 0)} / ${fmtBytes(vol.total, 0)}` }) : null,
-                f
-                  ? jsxs('div', {
-                      style: { ...MONO, fontSize: 10.5, color: 'var(--ui-text-tertiary)', display: 'flex', justifyContent: 'space-between' },
-                      children: [
-                        jsx('span', { children: `hermes pid ${f.process?.pid ?? DASH}` }),
-                        jsx('span', { children: `${fmtBytes(f.process?.rss)} · ${fmt(f.process?.cpu_percent)}% · ${f.process?.threads ?? DASH}thr` })
-                      ]
-                    })
-                  : null
-              ]
-            })
-            : null,
-          has('net')
-            ? jsx(Panel, {
-              title: 'net',
-              meta: f ? `↓${fmtRate(f.net.rx_bps)}  ↑${fmtRate(f.net.tx_bps)}` : null,
-              style: span(3, 6),
-              children: jsx(Scope, { series: [{ data: S.hist.rx }, { data: S.hist.tx }], fmtY: v => `${fmtBytes(v, 0)}/s` })
-            })
-            : null,
-          has('disk')
-            ? jsx(Panel, {
-              title: 'disk io',
-              meta: f ? `r ${fmtRate(f.disk.read_bps)}  w ${fmtRate(f.disk.write_bps)}` : null,
-              style: span(3, 6),
-              children: jsx(Scope, { series: [{ data: S.hist.rd }, { data: S.hist.wr }], fmtY: v => `${fmtBytes(v, 0)}/s` })
-            })
-            : null
+          ...['silicon', 'thermal', 'fleet', 'throughput', 'wire', 'power', 'memory', 'net', 'disk'].filter(has).map(id => {
+            const panel = metricPanels({ f, model, span })[id]()
+            return jsx(Panel, { ...panel.props }, id)
+          })
         ]
       })
     ]
@@ -1595,7 +1720,7 @@ function EmptyFrame() {
         BUILD_STEPS.map((s, i) =>
           jsx('span', {
             style: { ...MONO, fontSize: 10.5, color: 'var(--ui-text-quaternary)', border: '1px solid var(--ui-stroke-secondary)', borderRadius: 2, padding: '2px 8px' },
-            children: `${i + 1} ${s.id}`
+            children: `${i + 1} ${s.id === 'fleet' ? 'Sessions' : s.id === 'wire' ? 'Feed' : s.id}`
           }, s.id)
         )
       }),
@@ -1690,11 +1815,12 @@ export default {
       .map(atom => atom.listen(resetHardware))
     // Chrome starts HIDDEN. Disk sync restores it (and every built panel) if a build already
     // exists — a reload mid-demo keeps the dashboard as the model left it.
-    S.buildDir = ctx.storage.get('buildDir', null)
+    S.buildDir = ctx.storage.get('buildDir', null) || '~/monitoring-dashboard'
     void syncBuildFromDisk()
     const stopSync = ctx.setInterval(() => void syncBuildFromDisk(), DISK_SYNC_MS)
     ctx.onDispose(() => {
       _ctx = null
+      diskGeneration++
       feedGeneration++
       for (const stop of stopScope) stop()
       for (const timer of timers) clearInterval(timer)
