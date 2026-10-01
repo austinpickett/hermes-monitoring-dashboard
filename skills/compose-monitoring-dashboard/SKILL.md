@@ -1,13 +1,13 @@
 ---
 name: compose-monitoring-dashboard
-description: "Use when asked to create a dashboard or add, edit, reorder, or remove widgets. Configure one Monitoring dashboard with safe JSON edits."
+description: "Use when asked to create a dashboard or add, edit, reorder, or remove widgets. Configure one Personal Dashboard with safe JSON edits."
 version: 4.0.0
 license: MIT
 ---
 
-# Compose the Monitoring dashboard
+# Compose the Personal Dashboard
 
-All widgets belong inside ONE Monitoring dashboard. Do not create another native plugin per
+All widgets belong inside ONE Personal Dashboard. Do not create another native plugin per
 widget and do not edit installed plugin code. Persistent user data lives separately in
 `~/monitoring-dashboard/dashboard.json` on the **desktop device**. The plugin polls that folder
 about every two seconds and restores it on restart. For a remote backend, files must still be
@@ -44,7 +44,7 @@ written on the desktop device; do not claim that a remote-only file will update 
 ```
 
 - `version: 1`, `widgets: []` creates an honest blank dashboard. A config alone makes the
-  Monitoring navigation/chip visible; `page.html` is not required. Do not erase an existing
+  Personal Dashboard navigation/chip visible; `page.html` is not required. Do not erase an existing
   dashboard when asked to create one unless the user explicitly requests clearing it.
 - Supported types: `text`, `clock`, `date`, `uptime`, `calendar`, `throughput`, `silicon`,
   `thermal`, `fleet` (Sessions; legacy type ID), `feed`, `memory`, `net`, `disk`, `power`.

@@ -1,9 +1,9 @@
-# Hermes Monitoring Dashboard
+# Personal Dashboard
 
 ![Blue cyanotype-style monitoring instrument with a circular grid and pointer](assets/hermes-cyanotype.jpg)
 
 A Hermes plugin with a Python hardware sampler and a desktop monitoring page. The sidebar opens
-**Monitoring**; a statusbar chip shows estimated tok/s and temperature.
+**Personal Dashboard**; a statusbar chip shows estimated tok/s and temperature.
 
 - CPU clusters/cores, GPU activity and clocks, thermal and power readings.
 - Memory, swap, storage, disk and network I/O.
@@ -58,7 +58,7 @@ Replace any obsolete entry pointing into the old desktop-only package with this 
 User configuration lives in `~/monitoring-dashboard/dashboard.json`, **outside the plugin
 installation**, on the desktop device. See [`examples/dashboard.json`](examples/dashboard.json)
 and the [composition skill](skills/compose-monitoring-dashboard/SKILL.md) for the version 1 schema
-and safe prompt-driven edits. A config alone reveals Monitoring; it is polled every two seconds.
+and safe prompt-driven edits. A config alone reveals Personal Dashboard; it is polled every two seconds.
 Titles, accents, plain text/emoji, local clock/date, backend-host uptime, month calendar, existing
 monitoring panels, widths and order are configurable in one dashboard. No custom JavaScript runs.
 
