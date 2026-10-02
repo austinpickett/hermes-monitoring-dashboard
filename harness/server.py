@@ -19,7 +19,7 @@ from fastapi.staticfiles import StaticFiles
 from fixtures import metrics_fixture
 
 ROOT = Path(__file__).resolve().parent.parent
-API_DIR = ROOT / "dashboard"
+API_DIR = ROOT / "plugin" / "dashboard"
 # Match the plugin loader's package-style import so .metrics/.sensors imports
 # resolve inside this package, never from a hermes-agent source checkout.
 spec = importlib.util.spec_from_file_location(

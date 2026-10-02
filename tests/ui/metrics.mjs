@@ -5,7 +5,7 @@ import { readFile } from 'node:fs/promises'
 import test from 'node:test'
 import vm from 'node:vm'
 
-const source = await readFile(new URL('../../desktop/plugin.js', import.meta.url), 'utf8')
+const source = await readFile(new URL('../../plugin/desktop/plugin.js', import.meta.url), 'utf8')
 function load() {
   const pending = []
   const dispose = []

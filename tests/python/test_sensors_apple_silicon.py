@@ -272,7 +272,7 @@ def test_native_faults_and_cleanup_in_isolated_process(stage):
     ''')
     result = subprocess.run(
         [sys.executable, "-c", probe, stage],
-        cwd=Path(__file__).resolve().parents[2], capture_output=True, text=True, timeout=30,
+        cwd=Path(__file__).resolve().parents[2] / "plugin", capture_output=True, text=True, timeout=30,
     )
     assert result.returncode == 0, result.stdout + result.stderr
 

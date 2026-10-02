@@ -1,5 +1,6 @@
 name: hermes-monitoring-dashboard
 version: 1.0.1
+requires_hermes: ">=0.21.5"
 description: Live host telemetry and agent activity monitoring for Hermes Desktop.
 author: Austin Pickett
 homepage: https://github.com/austinpickett/hermes-monitoring-dashboard
