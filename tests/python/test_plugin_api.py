@@ -6,7 +6,7 @@ from pathlib import Path
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = Path(__file__).resolve().parents[2] / "plugin"
 
 
 def load_api(name="hermes_dashboard_plugin_hermes-monitoring-dashboard"):

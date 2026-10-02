@@ -1,11 +1,11 @@
 #!/usr/bin/env node
-// Stage both halves into an explicitly selected development home. Enable through Hermes;
+// Stage the plugin/ package into an explicitly selected development home. Enable through Hermes;
 // never overwrite the renderer's published package copy or a legacy standalone install.
 import { cpSync, existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-const src = resolve(dirname(fileURLToPath(import.meta.url)), '..')
+const src = resolve(dirname(fileURLToPath(import.meta.url)), '..', 'plugin')
 const home = process.env.HERMES_HOME
 if (!home) throw new Error('Set HERMES_HOME to an explicit development home before syncing.')
 const id = 'hermes-monitoring-dashboard'
