@@ -1,4 +1,4 @@
-// Hermes Personal Dashboard — realtime host + fleet instrument panel.
+// Hermes Monitoring Dashboard — realtime host + fleet instrument panel.
 // Hardware comes from this plugin's scoped REST backend; fleet/tokens from gateway events and
 // session RPCs. Nothing here is invented: a sensor the host can't read renders as "—", and the
 // SIM switch (clearly badged) is the only source of synthetic data.
@@ -158,7 +158,7 @@ async function resetBuild() {
       try {
         await fs.trashPath(`${S.buildDir}/${step.file}`)
       } catch (err) {
-        host.notify({ kind: 'error', message: `Personal Dashboard reset: couldn't remove ${S.buildDir}/${step.file} (${err?.message ?? err})` })
+        host.notify({ kind: 'error', message: `Monitoring Dashboard reset: couldn't remove ${S.buildDir}/${step.file} (${err?.message ?? err})` })
         return
       }
     }
@@ -1748,7 +1748,7 @@ function Chip() {
   return jsxs('button', {
     type: 'button',
     onClick: () => host.navigate(ROUTE),
-    title: 'Open Personal Dashboard',
+    title: 'Open Monitoring Dashboard',
     style: { ...MONO, fontSize: 11, display: 'inline-flex', gap: 8, alignItems: 'center', color: 'var(--ui-text-secondary)', background: 'none', border: 0, padding: '0 4px', cursor: 'pointer' },
     children: [
       jsx('span', { children: simmed(`${fmt(S.tokRate, S.tokRate < 10 ? 1 : 0)} tok/s`) }),
@@ -1773,7 +1773,7 @@ let _closeWorkspace = null
 function openWorkspace() {
   if (typeof host.openWorkspace === 'function') {
     _closeWorkspace = host.openWorkspace(ID, {
-      title: 'Personal Dashboard',
+      title: 'Monitoring Dashboard',
       dock: { pane: 'workspace', pos: 'right' },
       minWidth: '30rem',
       render: () => jsx(MonitoringPage, {}),
@@ -1797,7 +1797,7 @@ function registerChrome({ reveal } = {}) {
   if (!_chromeDispose) {
     _chromeDispose = _ctx.registerMany([
       { id: 'chip', area: STATUSBAR_AREAS.right, order: 5, render: () => jsx(Chip, {}) },
-      { id: 'nav', area: SIDEBAR_NAV_AREA, order: 60, data: { codicon: 'pulse', label: 'Personal Dashboard', path: ROUTE } }
+      { id: 'nav', area: SIDEBAR_NAV_AREA, order: 60, data: { codicon: 'pulse', label: 'Monitoring Dashboard', path: ROUTE } }
     ])
   }
   // The reveal: the blank frame opens itself ON the command — nothing is pre-opened.
@@ -1813,7 +1813,7 @@ function unregisterChrome() {
 
 export default {
   id: ID,
-  name: 'Personal Dashboard',
+  name: 'Monitoring Dashboard',
   register(ctx) {
     _ctx = ctx
     resetHardware()
@@ -1843,7 +1843,7 @@ export default {
         area: PALETTE_AREA,
         data: {
           id: `${ID}.open`,
-          label: 'Open Personal Dashboard',
+          label: 'Open Monitoring Dashboard',
           keywords: ['monitoring', 'telemetry', 'metrics', 'cpu', 'gpu', 'temperature', 'dashboard', 'fleet'],
           run: () => host.navigate(ROUTE)
         }
@@ -1853,7 +1853,7 @@ export default {
         area: PALETTE_AREA,
         data: {
           id: `${ID}.reset`,
-          label: 'Reset Personal Dashboard',
+          label: 'Reset Monitoring Dashboard',
           keywords: ['monitoring', 'telemetry', 'reset', 'compose', 'empty', 'demo'],
           run: () => {
             void resetBuild()
