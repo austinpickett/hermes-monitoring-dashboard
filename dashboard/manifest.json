@@ -1,6 +1,6 @@
 {
   "name": "hermes-monitoring-dashboard",
-  "label": "Personal Dashboard",
+  "label": "Monitoring Dashboard",
   "description": "Plugin-owned host metrics for the Hermes Desktop monitoring panel.",
   "version": "1.0.0",
   "tab": {"path": "/monitoring", "hidden": true},
