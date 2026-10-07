@@ -77,6 +77,10 @@ const ALL_STEPS = [CHROME_STEP, ...BUILD_STEPS]
 const BUILD_DIR_HINT = 'monitoring-dashboard'
 // Reset trashes files in the build dir, so only a folder named exactly monitoring-dashboard qualifies.
 const isBuildDir = dir => typeof dir === 'string' && /(^|[\\/])monitoring-dashboard$/.test(dir)
+// A dashboard.json the model put in a *-monitoring-dashboard folder (e.g. this plugin's own install
+// folder, …/plugins/hermes-monitoring-dashboard) is still followed and rendered rather than
+// silently ignored. Reading only: Reset keeps the strict isBuildDir rule above.
+const isConfigDir = dir => typeof dir === 'string' && /monitoring-dashboard$/.test(dir)
 const DISK_SYNC_MS = 2000
 const stepFor = name => BUILD_STEPS.find(s => s.id === name)
 const dirOf = p => String(p).replace(/[\\/][^\\/]*$/, '')
@@ -152,7 +156,7 @@ async function resetBuild() {
   }
   diskGeneration++
   const fs = desktopFs()
-  if (S.buildDir && fs?.trashPath) {
+  if (S.buildDir && isBuildDir(S.buildDir) && fs?.trashPath) {
     // Only the marker files the last listing found, never the folder itself or anything else in it.
     for (const step of ALL_STEPS.filter(s => S.built.includes(s.id))) {
       try {
@@ -390,10 +394,15 @@ function onGatewayEvent(ev) {
       logLine(p.error ? 'err' : 'done', `${p.name ?? st?.name ?? 'tool'}${dur != null ? `  ${dur.toFixed(2)}s` : ''}`, sid)
       const step = buildStepFromTool(p.name ?? st?.name, p.args)
       if (step) {
-        const resolved = p.result?.resolved_path
-        if (isBuildDir(dirOf(resolved))) {
-          S.buildDir = dirOf(resolved)
+        // Prefer the tool's resolved path; fall back to the absolute path the model passed.
+        const argPath = String(p.args?.path ?? '')
+        const resolved = p.result?.resolved_path ?? (/^([a-zA-Z]:)?[\\/]/.test(argPath) ? argPath : null)
+        const dir = resolved ? dirOf(resolved) : null
+        if (isBuildDir(dir) || (step.id === 'config' && isConfigDir(dir))) {
+          S.buildDir = dir
           _ctx?.storage.set('buildDir', S.buildDir)
+        } else if (step.id === 'config' && dir && !p.error && !p.result?.error) {
+          host.notify({ kind: 'error', message: `dashboard.json was written to ${dir}, but the dashboard reads ${S.buildDir}. Ask Hermes to write ~/monitoring-dashboard/dashboard.json in your home folder.` })
         }
         if (p.error || p.result?.error) {
           if (S.building === step.id) S.building = null
@@ -1822,7 +1831,7 @@ export default {
     // Chrome starts HIDDEN. Disk sync restores it (and every built panel) if a build already
     // exists — a reload mid-demo keeps the dashboard as the model left it.
     const storedDir = ctx.storage.get('buildDir', null)
-    S.buildDir = isBuildDir(storedDir) ? storedDir : '~/monitoring-dashboard'
+    S.buildDir = isBuildDir(storedDir) || isConfigDir(storedDir) ? storedDir : '~/monitoring-dashboard'
     void syncBuildFromDisk()
     const stopSync = ctx.setInterval(() => void syncBuildFromDisk(), DISK_SYNC_MS)
     ctx.onDispose(() => {
