@@ -1747,7 +1747,7 @@ function Chip() {
   const temp = f?.die.max
   return jsxs('button', {
     type: 'button',
-    onClick: () => host.navigate(ROUTE),
+    onClick: () => openWorkspace(),
     title: 'Open Monitoring Dashboard',
     style: { ...MONO, fontSize: 11, display: 'inline-flex', gap: 8, alignItems: 'center', color: 'var(--ui-text-secondary)', background: 'none', border: 0, padding: '0 4px', cursor: 'pointer' },
     children: [
@@ -1770,6 +1770,8 @@ let _closeWorkspace = null
 
 // The reveal opens the page as a tile docked beside the chat (the handoff's side-by-side
 // layout) rather than replacing it; older desktops without openWorkspace fall back to the route.
+// Re-entry is safe: host.openWorkspace re-fronts an existing tile for the same id instead of
+// stacking a duplicate (and refreshes its render in place), so every entry point funnels here.
 function openWorkspace() {
   if (typeof host.openWorkspace === 'function') {
     _closeWorkspace = host.openWorkspace(ID, {
@@ -1811,6 +1813,32 @@ function unregisterChrome() {
   }
 }
 
+// The route page. Sidebar nav rows can ONLY navigate (SidebarNavContribution carries just
+// codicon/label/path — no command/onClick hook), so the route stays registered as the nav
+// target but bounces straight into the docked tile: on mount it opens the workspace tile
+// beside the chat and steps the router back to wherever the user was, so the main pane never
+// settles on the dashboard. Older desktops without host.openWorkspace render the page in
+// place, exactly as before.
+function RoutePage() {
+  const docked = typeof host.openWorkspace === 'function'
+  useEffect(() => {
+    if (!docked) return
+    openWorkspace()
+    // Return the main pane to wherever the user was (the nav click pushed a hash entry).
+    // A direct load on the route has no entry to pop — fall back to the chat after a tick.
+    window.history.back()
+    const t = setTimeout(() => {
+      if (window.location.hash.slice(1).startsWith(ROUTE)) host.navigate('/')
+    }, 80)
+    return () => clearTimeout(t)
+  }, [docked])
+  if (!docked) return jsx(MonitoringPage, {})
+  return jsx('div', {
+    style: { flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center' },
+    children: jsx('span', { style: { ...LABEL, color: 'var(--ui-text-quaternary)' }, children: 'opening monitoring dashboard beside the chat…' })
+  })
+}
+
 export default {
   id: ID,
   name: 'Monitoring Dashboard',
@@ -1837,7 +1865,7 @@ export default {
       closeWorkspace()
     })
     ctx.registerMany([
-      { id: 'page', area: ROUTES_AREA, data: { path: ROUTE }, render: () => jsx(MonitoringPage, {}) },
+      { id: 'page', area: ROUTES_AREA, data: { path: ROUTE }, render: () => jsx(RoutePage, {}) },
       {
         id: 'open',
         area: PALETTE_AREA,
@@ -1845,7 +1873,7 @@ export default {
           id: `${ID}.open`,
           label: 'Open Monitoring Dashboard',
           keywords: ['monitoring', 'telemetry', 'metrics', 'cpu', 'gpu', 'temperature', 'dashboard', 'fleet'],
-          run: () => host.navigate(ROUTE)
+          run: () => openWorkspace()
         }
       },
       {
