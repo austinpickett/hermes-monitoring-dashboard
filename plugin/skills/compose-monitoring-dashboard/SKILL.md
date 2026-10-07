@@ -17,6 +17,12 @@ written on the desktop device; do not claim that a remote-only file will update 
 `dashboard.html` (or any other HTML/JS page) to build one: the plugin renders the dashboard from
 `~/monitoring-dashboard/dashboard.json` and nothing else you write will appear in it.
 
+**Where the file goes:** a folder named exactly `monitoring-dashboard` directly in the user's home
+folder: `~/monitoring-dashboard/dashboard.json` (on Windows `C:\Users\<name>\monitoring-dashboard\dashboard.json`).
+Pass the path to the file tools literally as `~/monitoring-dashboard/dashboard.json`. It is NOT this
+plugin's install folder (`…/plugins/hermes-monitoring-dashboard/`, where you loaded this skill from),
+NOT the Hermes home, and NOT the current working directory.
+
 ## Short commands
 
 The built-in panels, in their classic order (use this order whenever one isn't named):
