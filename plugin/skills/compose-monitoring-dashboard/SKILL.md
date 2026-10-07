@@ -1,6 +1,6 @@
 ---
 name: compose-monitoring-dashboard
-description: "Use when asked to create a dashboard or add, edit, reorder, or remove widgets. Configure one Monitoring Dashboard with safe JSON edits."
+description: "Use when asked to create a dashboard or dashboard page (blank, complete, full, monitoring), add a widget or panel, or edit, reorder, or remove widgets. This IS the Monitoring Dashboard plugin (hermes-monitoring-dashboard): configure it via ~/monitoring-dashboard/dashboard.json, never by writing an HTML page."
 version: 4.0.0
 license: MIT
 ---
@@ -12,6 +12,28 @@ widget and do not edit installed plugin code. Persistent user data lives separat
 `~/monitoring-dashboard/dashboard.json` on the **desktop device**. The plugin polls that folder
 about every two seconds and restores it on restart. For a remote backend, files must still be
 written on the desktop device; do not claim that a remote-only file will update the local UI.
+
+"a dashboard" in any request means THIS Monitoring Dashboard. Never write a standalone
+`dashboard.html` (or any other HTML/JS page) to build one: the plugin renders the dashboard from
+`~/monitoring-dashboard/dashboard.json` and nothing else you write will appear in it.
+
+## Short commands
+
+The built-in panels, in their classic order (use this order whenever one isn't named):
+`throughput`, `silicon`, `thermal`, `fleet` (Sessions), `feed` ("wire"), `memory`, `net`,
+`disk`, `power`. Classic widths: silicon 8, thermal 4, fleet 4, throughput 4, feed 4, power 3,
+memory 3, net 3, disk 3.
+
+- **"Create a (blank) dashboard (page)"** → `{"version": 1, "title": "MONITORING", "widgets": []}`
+  when no config exists yet (an existing one is kept, per the rule below).
+- **"Add a widget" / "add another widget"** → add the first classic panel not already in
+  `widgets`, with its classic width, `order` = current count.
+- **"Add the X widget"** → that panel (`wire` = `feed`, `sessions` = `fleet`).
+- **"Create a complete / full dashboard"** → add every classic panel still missing, in classic
+  order, in ONE write of the merged file. Keep widgets already there.
+
+Each command is one read of `dashboard.json` (when it exists) and one write. Reply with one short
+sentence naming what appeared.
 
 ## Safe editing workflow
 
